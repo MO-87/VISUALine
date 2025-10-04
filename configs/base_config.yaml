@@ -1,0 +1,4 @@
+# A global configuration file for shared settings like logging levels and default paths.
+
+# Example setting
+log_level: "INFO"

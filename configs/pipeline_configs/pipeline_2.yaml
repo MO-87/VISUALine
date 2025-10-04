@@ -1,0 +1,9 @@
+# Defines the sequence and parameters of nodes for a specific processing pipeline.
+
+# Example pipeline definition
+pipeline_name: "4K_Upscale_and_Colorize"
+nodes:
+  - node: "load_video"
+  - node: "colorize"
+  - node: "upscale_4k"
+  - node: "save_video"

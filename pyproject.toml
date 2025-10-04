@@ -1,0 +1,12 @@
+# Project metadata and dependencies for modern Python packaging and build tools.
+
+[tool.poetry]
+name = "visualine"
+version = "0.1.0"
+description = "An open-source AI suite for visual enhancement."
+authors = ["Mohamed Marzouk <marzouk@vacts.net>", 
+           "Theodoros Milad", 
+           "Yahia in da hood", 
+           "Mohamed Ezzat",
+           "Kareem Moamen", 
+           "Mazen Gaber"]

@@ -1,0 +1,84 @@
+# ======================
+# Python / FastAPI Base
+# ======================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+env_old/
+
+# ======================
+# Environment & Secrets
+# ======================
+.env
+*.env
+.env.*
+!.env.example
+
+# ======================
+# Build / Packaging
+# ======================
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ======================
+# Logs / Runtime files
+# ======================
+*.log
+logs/
+*.pid
+*.sqlite3
+*.db
+
+# ======================
+# Testing / Coverage
+# ======================
+.coverage
+htmlcov/
+.pytest_cache/
+.cache/
+
+# ======================
+# Type Checking
+# ======================
+.mypy_cache/
+.pytype/
+
+# ======================
+# Machine Learning / Models
+# ======================
+*.pth
+*.pt
+*.onnx
+*.h5
+*.ckpt
+models/
+checkpoints/
+
+# ======================
+# IDE / Editor
+# ======================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ======================
+# OS / Misc
+# ======================
+.DS_Store
+Thumbs.db
+
+# ======================
+# Docker
+# ======================
+docker-compose.override.yml
+*.pid

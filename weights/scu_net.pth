@@ -1,3 +1,5 @@
 this is just a PLACEHOLDER file.. 
 
-real weights should be downloaded by running: "main_download_pretrained_models.py" from the **SCUNet** official github repo: https://github.com/cszn/SCUNet
+1. real weights should be downloaded by running: "main_download_pretrained_models.py" from the **SCUNet** official github repo: https://github.com/cszn/SCUNet
+
+2. run this command to get the models we need: python main_download_pretrained_models.py --models "scunet_color_real_psnr.pth scunet_color_real_gan.pth" --model_dir "weights"

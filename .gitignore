@@ -60,7 +60,6 @@ htmlcov/
 *.onnx
 *.h5
 *.ckpt
-models/
 checkpoints/
 
 # ======================

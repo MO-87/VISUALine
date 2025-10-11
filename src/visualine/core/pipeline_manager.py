@@ -15,13 +15,15 @@ logger = logging.getLogger(__name__)
 
 
 class PipelineManager:
-    """Efficient in-memory pipeline runner with optional GPU acceleration."""
+    """Efficient in-memory pipeline runner with GPU acceleration and batch optimization."""
 
     def __init__(self, config_loader: BaseConfigLoader, node_namespace: str = "visualine.nodes"):
         self._config_loader = config_loader
         self._node_namespace = node_namespace
         self._pipeline: List[NodeBase] = []
         self._use_cuda = torch.cuda.is_available()
+        self._batch_size = 8  ## adjustable batch size for optimized throughput
+
         if self._use_cuda:
             logger.info(f"GPU acceleration enabled ({torch.cuda.get_device_name(0)}).")
         else:
@@ -44,12 +46,12 @@ class PipelineManager:
             logger.debug(f" -> Node: {repr(node)}")
 
     def run(self, input_video_path: Path, output_video_path: Path) -> None:
-        """Runs the loaded pipeline on a video in-memory, with GPU optimization."""
+        """Runs the loaded pipeline on a video in-memory, processing in batches for speed."""
         if not self._pipeline:
             logger.error("No pipeline loaded — cannot run.")
             return
 
-        logger.info(f"Running GPU-capable pipeline on '{input_video_path}'...")
+        logger.info(f"Running batch-optimized pipeline on '{input_video_path}'...")
 
         try:
             with VideoProcessor(input_video_path) as processor:
@@ -68,32 +70,22 @@ class PipelineManager:
 
                 audio_path = processor.extract_audio()
 
+                frame_buffer = []
                 frame_idx = 0
+
                 while True:
                     ret, frame = cap.read()
                     if not ret:
+                        ## flush remaining frames if any
+                        if frame_buffer:
+                            self._process_and_write_batch(frame_buffer, out)
                         break
 
-                    ## converting to GPU if possible
-                    if self._use_cuda:
-                        try:
-                            frame_gpu = cv2.cuda_GpuMat()
-                            frame_gpu.upload(frame)
-                            frame = frame_gpu
-                        except Exception as e:
-                            logger.warning(f"Falling back to CPU for frame {frame_idx}: {e}")
-                            frame = frame  ## just CPU numpy array
+                    frame_buffer.append(frame)
+                    if len(frame_buffer) >= self._batch_size:
+                        self._process_and_write_batch(frame_buffer, out)
+                        frame_buffer = []
 
-                    ## processing through nodes
-                    for node in self._pipeline:
-                        ## some nodes might require CPU numpy arrays.. handling auto conversion
-                        frame = self._process_frame_with_node(node, frame)
-
-                    ## frame is back on CPU for writing
-                    if isinstance(frame, cv2.cuda_GpuMat):
-                        frame = frame.download()
-
-                    out.write(frame)
                     frame_idx += 1
 
                     if frame_idx % 50 == 0 or frame_idx == total_frames:
@@ -116,6 +108,44 @@ class PipelineManager:
 
         except (FFmpegError, Exception) as e:
             logger.critical(f"Pipeline run failed: {e}", exc_info=True)
+
+    def _process_and_write_batch(self, frames: List[np.ndarray], out: cv2.VideoWriter) -> None:
+        """
+        Processes a batch of frames through all nodes, GPU-optimized if available.
+        """
+        try:
+            ## moving batch to GPU tensor if supported
+            if self._use_cuda:
+                batch_tensor = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).float().cuda(non_blocking=True)
+            else:
+                batch_tensor = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).float()
+
+            ## process through each node
+            for node in self._pipeline:
+                if hasattr(node, "use_torch") and node.use_torch:
+                    batch_tensor = node.process(batch_tensor)
+                else:
+                    ## convert to numpy batch for OpenCV-based nodes
+                    batch_np = batch_tensor.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
+                    batch_np = np.stack([node.process(f) for f in batch_np])
+                    batch_tensor = torch.from_numpy(batch_np).permute(0, 3, 1, 2).float()
+                    if self._use_cuda:
+                        batch_tensor = batch_tensor.cuda(non_blocking=True)
+
+            ## back to CPU numpy for writing
+            final_batch = batch_tensor.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
+
+            ## write processed frames
+            for frame in final_batch:
+                out.write(frame)
+
+        except Exception as e:
+            logger.error(f"Error while processing batch: {e}", exc_info=True)
+            ## fallback to CPU per-frame processing
+            for f in frames:
+                for node in self._pipeline:
+                    f = self._process_frame_with_node(node, f)
+                out.write(f)
 
     def _process_frame_with_node(self, node: NodeBase, frame: Any) -> Any:
         """

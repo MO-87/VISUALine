@@ -10,24 +10,20 @@ import torch
 from visualine.core.config_loader import BaseConfigLoader
 from visualine.core.node_base import NodeBase
 from visualine.utils.file_io import VideoProcessor, FFmpegError
+from visualine.core.task_executer import TaskExecuter
 
 logger = logging.getLogger(__name__)
 
 
 class PipelineManager:
-    """Efficient in-memory pipeline runner with GPU acceleration and batch optimization."""
+    """High-level orchestrator for building and running a visual processing pipeline."""
 
     def __init__(self, config_loader: BaseConfigLoader, node_namespace: str = "visualine.nodes"):
         self._config_loader = config_loader
         self._node_namespace = node_namespace
         self._pipeline: List[NodeBase] = []
-        self._use_cuda = torch.cuda.is_available()
+        self._executer = TaskExecuter()
         self._batch_size = 8  ## adjustable batch size for optimized throughput
-
-        if self._use_cuda:
-            logger.info(f"GPU acceleration enabled ({torch.cuda.get_device_name(0)}).")
-        else:
-            logger.info("GPU not available. Running on CPU.")
 
     def load_pipeline(self, pipeline_config_path: Path) -> None:
         """Loads pipeline configuration and builds node chain."""
@@ -37,7 +33,6 @@ class PipelineManager:
         pipeline_nodes_config = config.get("pipeline", [])
         if not pipeline_nodes_config:
             logger.warning("Pipeline configuration is empty.")
-            self._pipeline = []
             return
 
         self._pipeline = [self._create_node_instance(nc) for nc in pipeline_nodes_config]
@@ -46,12 +41,12 @@ class PipelineManager:
             logger.debug(f" -> Node: {repr(node)}")
 
     def run(self, input_video_path: Path, output_video_path: Path) -> None:
-        """Runs the loaded pipeline on a video in-memory, processing in batches for speed."""
+        """Runs the pipeline on a video file using batched GPU-optimized processing."""
         if not self._pipeline:
             logger.error("No pipeline loaded — cannot run.")
             return
 
-        logger.info(f"Running batch-optimized pipeline on '{input_video_path}'...")
+        logger.info(f"Running pipeline on '{input_video_path}' (batch={self._batch_size})...")
 
         try:
             with VideoProcessor(input_video_path) as processor:
@@ -71,7 +66,7 @@ class PipelineManager:
                 audio_path = processor.extract_audio()
 
                 frame_buffer = []
-                frame_idx = 0
+                processed_frames = 0
 
                 while True:
                     ret, frame = cap.read()
@@ -86,15 +81,14 @@ class PipelineManager:
                         self._process_and_write_batch(frame_buffer, out)
                         frame_buffer = []
 
-                    frame_idx += 1
-
-                    if frame_idx % 50 == 0 or frame_idx == total_frames:
-                        logger.info(f"Progress: {frame_idx}/{total_frames} frames processed.")
+                    processed_frames += 1
+                    if processed_frames % 50 == 0:
+                        logger.info(f"Progress: {processed_frames}/{total_frames} frames processed.")
 
                 cap.release()
                 out.release()
 
-                ## merging audio if exists
+                ## merging audio back if exists
                 if audio_path and audio_path.exists():
                     processor._run_command([
                         "ffmpeg", "-y",
@@ -104,80 +98,34 @@ class PipelineManager:
                         str(output_video_path)
                     ])
 
-            logger.info(f"Pipeline completed successfully (GPU={self._use_cuda}). Output: {output_video_path}")
+            logger.info(f"Pipeline completed successfully. Output saved to: {output_video_path}")
 
         except (FFmpegError, Exception) as e:
             logger.critical(f"Pipeline run failed: {e}", exc_info=True)
 
     def _process_and_write_batch(self, frames: List[np.ndarray], out: cv2.VideoWriter) -> None:
-        """
-        Processes a batch of frames through all nodes, GPU-optimized if available.
-        """
+        """Processes and writes a batch of frames using the TaskExecuter."""
         try:
-            ## moving batch to GPU tensor if supported
-            if self._use_cuda:
-                batch_tensor = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).float().cuda(non_blocking=True)
-            else:
-                batch_tensor = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).float()
+            batch_tensor = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).float()
+            if self._executer._use_cuda:
+                batch_tensor = batch_tensor.cuda(non_blocking=True)
 
-            ## process through each node
-            for node in self._pipeline:
-                if hasattr(node, "use_torch") and node.use_torch:
-                    batch_tensor = node.process(batch_tensor)
-                else:
-                    ## convert to numpy batch for OpenCV-based nodes
-                    batch_np = batch_tensor.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-                    batch_np = np.stack([node.process(f) for f in batch_np])
-                    batch_tensor = torch.from_numpy(batch_np).permute(0, 3, 1, 2).float()
-                    if self._use_cuda:
-                        batch_tensor = batch_tensor.cuda(non_blocking=True)
+            processed_batch = self._executer.execute_batch(self._pipeline, batch_tensor)
+            final_batch = processed_batch.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
 
-            ## back to CPU numpy for writing
-            final_batch = batch_tensor.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-
-            ## write processed frames
-            for frame in final_batch:
-                out.write(frame)
+            for f in final_batch:
+                out.write(f)
 
         except Exception as e:
-            logger.error(f"Error while processing batch: {e}", exc_info=True)
+            logger.error(f"Batch processing failed, falling back to per-frame mode: {e}", exc_info=True)
             ## fallback to CPU per-frame processing
             for f in frames:
                 for node in self._pipeline:
-                    f = self._process_frame_with_node(node, f)
+                    f = self._executer.execute_frame(node, f)
                 out.write(f)
 
-    def _process_frame_with_node(self, node: NodeBase, frame: Any) -> Any:
-        """
-        Processes a frame through a node, auto-handling CPU/GPU conversion if necessary.
-        """
-        try:
-            ## handling PyTorch-based nodes
-            if hasattr(node, "use_torch") and node.use_torch:
-                if isinstance(frame, np.ndarray):
-                    frame_tensor = torch.from_numpy(frame).permute(2, 0, 1).float().unsqueeze(0)
-                    if self._use_cuda:
-                        frame_tensor = frame_tensor.cuda(non_blocking=True)
-                else:
-                    frame_tensor = frame  ## assuming already on GPU
-
-                result = node.process(frame_tensor)
-
-                ## converting back to numpy if torch tensor
-                if torch.is_tensor(result):
-                    result = result.squeeze(0).permute(1, 2, 0).detach().cpu().numpy().astype(np.uint8)
-
-                return result
-
-            ## otherwise assume OpenCV-based node
-            return node.process(frame)
-
-        except Exception as e:
-            logger.error(f"Error in node '{node.__class__.__name__}': {e}")
-            return frame
-
     def _create_node_instance(self, node_config: Dict[str, Any]) -> NodeBase:
-        """Dynamically loads a node class from config."""
+        """Dynamically loads a node class based on the provided config."""
         class_path = node_config.get("class")
         if not class_path:
             raise ValueError("Node configuration missing 'class' key.")
@@ -193,5 +141,6 @@ class PipelineManager:
 
             params = node_config.get("params", {})
             return node_class(config=params)
+        
         except (ImportError, AttributeError) as e:
             raise ImportError(f"Could not load node class '{class_path}': {e}")

@@ -40,6 +40,12 @@ class TaskExecuter:
                 logger.debug(f"Converting batch for CPU node: {node.node_name}")
                 batch_np = data_batch.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
                 processed_np = np.stack([node.process(f) for f in batch_np])
+
+                ## if the processed batch is 3D (like grayscale).. add a channel dimension.
+                if processed_np.ndim == 3:
+                    processed_np = np.expand_dims(processed_np, axis=-1)
+                
+                ## batch is guaranteed to be 4D, so permute will work.
                 data_batch = torch.from_numpy(processed_np).permute(0, 3, 1, 2).float()
 
                 ## move back to GPU if necessary

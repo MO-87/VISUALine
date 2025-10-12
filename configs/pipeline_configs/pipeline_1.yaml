@@ -1,9 +1,15 @@
-# Defines the sequence and parameters of nodes for a specific processing pipeline.
+pipeline_name: "4K_Denoise_and_Upscale"
 
-# Example pipeline definition
-pipeline_name: "4K_Upscale_and_Colorize"
-nodes:
-  - node: "load_video"
-  - node: "colorize"
-  - node: "upscale_4k"
-  - node: "save_video"
+pipeline:
+  - class: "denoise.DnModelNode"
+    params:
+      model_name: "scunet_color_real_psnr"
+      strength: 0.85
+      use_torch: true
+
+  - class: "upscale.Upscale4KNode"
+    params:
+      model_name: "real_esrgan_x4plus"
+      tile_size: 256
+      fp16: true
+      use_torch: true

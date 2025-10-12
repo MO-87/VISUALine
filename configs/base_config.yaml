@@ -1,4 +1,21 @@
-# A global configuration file for shared settings like logging levels and default paths.
+# =====================================================================
+# Base Configuration File for Visualine
+# Shared system-wide defaults (logging, paths, performance tuning, etc.)
+# =====================================================================
 
-# Example setting
-log_level: "INFO"
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(levelname)s - [%(name)s] - %(message)s"
+  filename: "visualine.log"        ## log output filename
+  max_bytes: 5242880               ## 5 MB max file size before rotation
+  backup_count: 5                  ## num of rotated log files to keep
+
+paths:
+  input_dir: "./data/input"        ## default input directory for video files
+  output_dir: "./data/output"      ## default output directory for processed videos
+  temp_dir: "./data/temp"          ## for temporary files like audio extraction, etc.
+
+system:
+  use_gpu: true                    ## whether to enable GPU acceleration
+  batch_size: 8                    ## global default for pipeline batch size
+  cache_size: 3                    ## max num of models cached in ResourceManager

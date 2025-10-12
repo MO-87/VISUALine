@@ -182,18 +182,18 @@ class PipelineManager:
                         processed_frames += len(frame_buffer)
                         frame_buffer = []
                     
-                    if (processed_frames > 0) and (processed_frames % 50 == 0):
-                        logger.info(f"Progress: {processed_frames}/{total_frames} frames processed.")
+                        if (processed_frames > 0) and (processed_frames % 50 == 0):
+                            logger.info(f"Progress: {processed_frames}/{total_frames} frames processed.")
 
                 cap.release()
                 out.release()
                 logger.info(f"Finished processing {processed_frames} frames.")
 
                 logger.info("Merging audio back into the final video...")
-                processor.recombine_video(
-                    output_path=output_video_path,
-                    temp_video_path=temp_video_path,
-                    audio_path=audio_path
+                processor.merge_audio(
+                    video_input=temp_video_path,
+                    audio_input=audio_path,
+                    final_output=output_video_path
                 )
                 temp_video_path.unlink(missing_ok=True)
 

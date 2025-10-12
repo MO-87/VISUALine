@@ -138,3 +138,17 @@ class VideoProcessor:
         command.append(str(output_path))
         self._run_command(command)
         logger.info(f"Successfully created final video at: {output_path}")
+
+    def merge_audio(self, video_input: Path, audio_input: Path, final_output: Path):
+        if not audio_input or not audio_input.exists():
+            logger.warning("No audio file provided to merge. Copying video file directly.")
+            shutil.copy(video_input, final_output)
+            return
+            
+        logger.info(f"Merging audio from {audio_input} into {final_output}...")
+        command = [
+            "ffmpeg", "-y", "-i", str(video_input), "-i", str(audio_input),
+            "-c:v", "copy", "-c:a", "aac", "-shortest", str(final_output)
+        ]
+        self._run_command(command)
+        logger.info("Successfully merged audio.")

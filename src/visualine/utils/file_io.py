@@ -58,7 +58,7 @@ class VideoProcessor:
                 command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
             )
         except subprocess.CalledProcessError as e:
-            error_lines = (e.stderr.decode() if e.stderr else "No stderr.").splitlines()[:5]
+            error_lines = (e.stderr.decode() if e.stderr else "No stderr.").splitlines()[:10]
             error_message = "\n".join(error_lines)
             logger.error(f"FFmpeg command failed: {' '.join(command)}")
             logger.error(f"FFmpeg stderr: {error_message}")
@@ -111,7 +111,7 @@ class VideoProcessor:
     def extract_audio(self) -> Path | None:
         logger.info(f"Extracting audio from {self.video_path}...")
         self.audio_path = self.temp_dir / "audio.aac"
-        command = ["ffmpeg", "-i", str(self.video_path), "-vn", "-acodec", "copy", str(self.audio_path)]
+        command = ["ffmpeg", "-y", "-i", str(self.video_path), "-vn", "-c:a", "copy", str(self.audio_path)]
         
         try:
             self._run_command(command)
@@ -124,31 +124,36 @@ class VideoProcessor:
             self.audio_path = None
             return None
 
-    def recombine_video(self, output_path: Path, framerate: float = None, crf: int = 18):
+    def recombine_video(self, video_only_path: Path, output_path: Path, reencode: bool = False):
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        effective_framerate = framerate if framerate is not None else self.get_framerate()
-        logger.info(f"Recombining frames into {output_path} at {effective_framerate:.2f} fps...")
-        frame_pattern = self.frames_dir / "frame_%06d.png"
-        command = [
-            "ffmpeg", "-y", "-framerate", str(effective_framerate), "-i", str(frame_pattern),
-            "-c:v", "libx264", "-crf", str(crf), "-pix_fmt", "yuv420p"
-        ]
-        if self.audio_path and self.audio_path.exists():
-            command.extend(["-i", str(self.audio_path), "-c:a", "aac", "-shortest"])
-        command.append(str(output_path))
-        self._run_command(command)
-        logger.info(f"Successfully created final video at: {output_path}")
 
-    def merge_audio(self, video_input: Path, audio_input: Path, final_output: Path):
-        if not audio_input or not audio_input.exists():
-            logger.warning("No audio file provided to merge. Copying video file directly.")
-            shutil.copy(video_input, final_output)
+        if not self.audio_path or not self.audio_path.exists():
+            logger.info("No audio to merge. Re-encoding video for size control (no audio present).")
+            self._run_command([
+                "ffmpeg", "-y", "-i", str(video_only_path),
+                "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", str(output_path)
+            ])
+            logger.info("Video re-encoded (no audio).")
             return
-            
-        logger.info(f"Merging audio from {audio_input} into {final_output}...")
-        command = [
-            "ffmpeg", "-y", "-i", str(video_input), "-i", str(audio_input),
-            "-c:v", "copy", "-c:a", "aac", "-shortest", str(final_output)
-        ]
+
+        if reencode:
+            logger.info("Re-encoding required — merging audio with re-encoded video...")
+            command = [
+                "ffmpeg", "-y",
+                "-i", str(video_only_path), "-i", str(self.audio_path),
+                "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart", "-shortest", str(output_path)
+            ]
+        else:
+            logger.info("Merging audio using stream-copy (no re-encoding needed)...")
+            command = [
+                "ffmpeg", "-y",
+                "-i", str(video_only_path), "-i", str(self.audio_path),
+                "-c:v", "copy", "-c:a", "copy",
+                "-movflags", "+faststart", "-shortest", str(output_path)
+            ]
+
         self._run_command(command)
-        logger.info("Successfully merged audio.")
+        logger.info("Final video successfully written.")

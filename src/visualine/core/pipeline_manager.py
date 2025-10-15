@@ -164,23 +164,26 @@ class PipelineManager:
 
                 audio_path = processor.extract_audio()
                 frame_buffer, processed_frames = [], 0
+                output_resolution = (width, height)  ## to track first processed frame size
 
                 while True:
                     ret, frame_bgr = cap.read()
                     if not ret:
                         ## flushing remaining frames if any
                         if frame_buffer:
-                            self._process_and_write_batch(frame_buffer, out)
+                            out_resolution = self._process_and_write_batch(frame_buffer, out)
                             processed_frames += len(frame_buffer)
+                            output_resolution = out_resolution or output_resolution
                         break
                     
                     frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                     frame_buffer.append(frame)
 
                     if len(frame_buffer) >= self._batch_size:
-                        self._process_and_write_batch(frame_buffer, out)
+                        out_resolution = self._process_and_write_batch(frame_buffer, out)
                         processed_frames += len(frame_buffer)
                         frame_buffer = []
+                        output_resolution = out_resolution or output_resolution
                     
                         if (processed_frames > 0) and (processed_frames % 50 == 0):
                             logger.info(f"Progress: {processed_frames}/{total_frames} frames processed.")
@@ -189,20 +192,28 @@ class PipelineManager:
                 out.release()
                 logger.info(f"Finished processing {processed_frames} frames.")
 
+                ## determine if re-encoding is needed
+                reencode_needed = output_resolution != (width, height)
+                if reencode_needed:
+                    logger.info(
+                        f"Resolution changed from {width}x{height} → {output_resolution[0]}x{output_resolution[1]}. "
+                        f"Re-encoding will be used."
+                    )
+
                 logger.info("Merging audio back into the final video...")
-                processor.merge_audio(
-                    video_input=temp_video_path,
-                    audio_input=audio_path,
-                    final_output=output_video_path
+                processor.recombine_video(
+                    video_only_path=temp_video_path,
+                    output_path=output_video_path,
+                    reencode=reencode_needed
                 )
                 temp_video_path.unlink(missing_ok=True)
 
-            logger.info(f"Pipeline completed successfully. Output saved to: {output_video_path}")
+            logger.info(f"Video Pipeline completed successfully. Output saved to: {output_video_path}")
 
         except (FFmpegError, Exception) as e:
-            logger.critical(f"Pipeline run failed: {e}", exc_info=True)
+            logger.critical(f"Video Pipeline run failed: {e}", exc_info=True)
 
-    def _process_and_write_batch(self, frames: List[np.ndarray], out: cv2.VideoWriter) -> None:
+    def _process_and_write_batch(self, frames: List[np.ndarray], out: cv2.VideoWriter) -> tuple:
         """Processes and writes a batch of frames using the TaskExecuter."""
         try:
             batch_tensor = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).float()
@@ -212,6 +223,7 @@ class PipelineManager:
             processed_batch = self._executer.execute_batch(self._pipeline, batch_tensor)
             final_batch_rgb = processed_batch.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
 
+            h, w = final_batch_rgb[0].shape[:2]
             for img_rgb in final_batch_rgb:
                 img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
                 out.write(img_bgr)
@@ -219,8 +231,11 @@ class PipelineManager:
             del batch_tensor, processed_batch, final_batch_rgb
             if self._executer._use_cuda:
                 torch.cuda.empty_cache()
+
+            return (w, h)  ## return resolution for comparison
         except Exception as e:
             logger.error(f"Batch video processing failed: {e}", exc_info=True)
+            return None
 
     def _create_node_instance(self, node_config: Dict[str, Any]) -> NodeBase:
         """Dynamically loads a node class based on the provided config."""

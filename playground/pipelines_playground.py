@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+import time
 
 # Important: We need to set up the logger before other imports
 # to ensure all modules use the same configuration.
@@ -51,11 +52,13 @@ def main():
 
     # 3. Load and Run the Pipeline
     try:
+        t0 = time.time()
         manager.load_pipeline(pipeline_config_path=pipeline_config)
         manager.run(input_path=input_video, output_path=output_video)
     except Exception as e:
         logger.critical(f"An error occurred during the pipeline run: {e}", exc_info=True)
     
+    logger.info(f"Running Pipeline took: {time.time() - t0:.2f}s")
     logger.info("========== VISUALine Pipeline Test Finished ==========")
 
 

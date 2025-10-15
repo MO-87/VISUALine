@@ -47,5 +47,12 @@ def setup_logger(log_config: Dict[str, Any], log_dir: Path) -> None:
         )
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
+    
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.propagate = False
+    if not root_logger.handlers:
+        root_logger.addHandler(console_handler)
+        root_logger.addHandler(file_handler)
 
     logger.info("Logger has been configured.")

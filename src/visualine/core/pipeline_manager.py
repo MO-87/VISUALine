@@ -1,7 +1,11 @@
+import os
 import importlib
 import logging
 from pathlib import Path
 from typing import Any, Dict, List
+from concurrent.futures import ThreadPoolExecutor
+import queue
+import threading
 
 import cv2
 import numpy as np
@@ -26,7 +30,15 @@ class PipelineManager:
         self._node_namespace = node_namespace
         self._pipeline: List[NodeBase] = []
         self._executer = TaskExecuter()
-        self._batch_size = 8  ## adjustable batch size for optimized throughput
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        if self.device == "cuda":
+            self._batch_size = self._auto_select_batch_size()  ## increase/decrease if you have high/low VRAM
+            self._max_workers = 1
+        else:
+            cpu_cores = os.cpu_count() or 4
+            self._batch_size = 8
+            self._max_workers = min(4, cpu_cores // 2)
 
     def load_pipeline(self, pipeline_config_path: Path) -> None:
         """Loads pipeline configuration and builds node chain."""
@@ -48,6 +60,9 @@ class PipelineManager:
         if not self._pipeline:
             logger.error("No pipeline loaded — cannot run.")
             return
+
+        logger.info(f"Initialized PipelineManager on {self.device.upper()} | "
+            f"batch_size={self._batch_size}, max_workers={self._max_workers}")
 
         file_suffix = input_path.suffix.lower()
 
@@ -143,8 +158,18 @@ class PipelineManager:
         except Exception as e:
             logger.error(f"Batch image processing failed: {e}", exc_info=True)
 
+    def _safe_execute_batch(self, batch_tensor):
+        """Executes a GPU batch safely with adaptive fallback in case of OOM."""
+        try:
+            return self._executer.execute_batch(self._pipeline, batch_tensor)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            self._batch_size = max(1, self._batch_size // 2)
+            logger.warning(f"[WARNING] GPU OOM detected. Reducing batch size to {self._batch_size}.")
+            raise
+
     def _run_video(self, input_video_path: Path, output_video_path: Path) -> None:
-        """Runs the pipeline on a video file using batched GPU-optimized processing."""
+        """Runs the pipeline on a video file using async batched GPU-optimized processing."""
         try:
             with VideoProcessor(input_video_path) as processor:
                 cap = cv2.VideoCapture(str(input_video_path))
@@ -162,34 +187,80 @@ class PipelineManager:
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                 out = cv2.VideoWriter(str(temp_video_path), fourcc, fps, (width, height))
 
-                audio_path = processor.extract_audio()
-                frame_buffer, processed_frames = [], 0
-                output_resolution = (width, height)  ## to track first processed frame size
+                ## init audio extraction in parallel
+                audio_thread = threading.Thread(target=processor.extract_audio)
+                audio_thread.start()
 
-                while True:
-                    ret, frame_bgr = cap.read()
-                    if not ret:
-                        ## flushing remaining frames if any
-                        if frame_buffer:
-                            out_resolution = self._process_and_write_batch(frame_buffer, out)
-                            processed_frames += len(frame_buffer)
-                            output_resolution = out_resolution or output_resolution
-                        break
-                    
-                    frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                    frame_buffer.append(frame)
+                output_resolution = (width, height)
+                read_queue = queue.Queue(maxsize=4)
+                write_queue = queue.Queue()
+                stop_signal = object()
 
-                    if len(frame_buffer) >= self._batch_size:
-                        out_resolution = self._process_and_write_batch(frame_buffer, out)
-                        processed_frames += len(frame_buffer)
-                        frame_buffer = []
-                        output_resolution = out_resolution or output_resolution
-                    
-                        if (processed_frames > 0) and (processed_frames % 50 == 0):
+                ## prefetch thread (I/O bound)
+                def frame_reader():
+                    frame_buffer = []
+                    while True:
+                        ret, frame_bgr = cap.read()
+                        if not ret:
+                            if frame_buffer:
+                                read_queue.put(frame_buffer)
+                            read_queue.put(stop_signal)
+                            break
+
+                        frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                        frame_buffer.append(frame)
+
+                        if len(frame_buffer) >= self._batch_size:
+                            read_queue.put(frame_buffer)
+                            frame_buffer = []
+
+                ## write thread (I/O bound)
+                def frame_writer():
+                    while True:
+                        item = write_queue.get()
+                        if item is stop_signal:
+                            break
+                        for img_rgb in item:
+                            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+                            out.write(img_bgr)
+                        write_queue.task_done()
+
+                reader_thread = threading.Thread(target=frame_reader, daemon=True)
+                writer_thread = threading.Thread(target=frame_writer, daemon=True)
+                reader_thread.start()
+                writer_thread.start()
+
+                processed_frames = 0
+                with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+                    logger.info(f"Device: {self.device.upper()} | ThreadPool workers: {self._max_workers}")
+                    future = None
+                    while True:
+                        batch = read_queue.get()
+                        if batch is stop_signal:
+                            if future:
+                                results = future.result()
+                                write_queue.put(results)
+                                processed_frames += len(results)
+                            break
+
+                        if future:
+                            results = future.result()
+                            write_queue.put(results)
+                            processed_frames += len(results)
+
+                        future = executor.submit(self._process_video_batch_async, batch)
+
+                        if processed_frames % 50 == 0 and processed_frames > 0:
                             logger.info(f"Progress: {processed_frames}/{total_frames} frames processed.")
 
+                write_queue.put(stop_signal)
+                writer_thread.join()
                 cap.release()
                 out.release()
+
+                ## wait for audio extraction to finish before merge
+                audio_thread.join()
+
                 logger.info(f"Finished processing {processed_frames} frames.")
 
                 ## determine if re-encoding is needed
@@ -213,29 +284,25 @@ class PipelineManager:
         except (FFmpegError, Exception) as e:
             logger.critical(f"Video Pipeline run failed: {e}", exc_info=True)
 
-    def _process_and_write_batch(self, frames: List[np.ndarray], out: cv2.VideoWriter) -> tuple:
-        """Processes and writes a batch of frames using the TaskExecuter."""
+    def _process_video_batch_async(self, frames: List[np.ndarray]) -> List[np.ndarray]:
+        """Processes a batch of frames asynchronously."""
         try:
-            batch_tensor = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).float()
+            batch_tensor = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).float().pin_memory()
             if self._executer._use_cuda:
                 batch_tensor = batch_tensor.cuda(non_blocking=True)
 
-            processed_batch = self._executer.execute_batch(self._pipeline, batch_tensor)
+            with torch.no_grad():
+                processed_batch = self._safe_execute_batch(batch_tensor)
+
             final_batch_rgb = processed_batch.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-
-            h, w = final_batch_rgb[0].shape[:2]
-            for img_rgb in final_batch_rgb:
-                img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-                out.write(img_bgr)
-
-            del batch_tensor, processed_batch, final_batch_rgb
+            del batch_tensor, processed_batch
             if self._executer._use_cuda:
                 torch.cuda.empty_cache()
 
-            return (w, h)  ## return resolution for comparison
+            return final_batch_rgb
         except Exception as e:
-            logger.error(f"Batch video processing failed: {e}", exc_info=True)
-            return None
+            logger.error(f"Async batch video processing failed: {e}", exc_info=True)
+            return []
 
     def _create_node_instance(self, node_config: Dict[str, Any]) -> NodeBase:
         """Dynamically loads a node class based on the provided config."""
@@ -260,3 +327,15 @@ class PipelineManager:
                 f"Could not load class '{class_name}' from module '{full_module_path}'. "
                 f"Check your pipeline configuration. Original error: {e}"
             )
+    
+    def _auto_select_batch_size(self):
+        base_size = 16
+        max_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        logger.info(f"GPU VRAM: {max_vram:.2f} GB")
+
+        if max_vram > 12:
+            return 64
+        elif max_vram > 8:
+            return 32
+        else:
+            return base_size

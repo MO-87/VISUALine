@@ -54,15 +54,19 @@ class VideoProcessor:
     def _run_command(self, command: list):
         logger.debug(f"Running FFmpeg command: {' '.join(command)}")
         try:
-            subprocess.run(
-                command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            result = subprocess.run(
+                command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
+            if result.stderr:
+                stderr_msg = result.stderr.decode(errors="ignore")
+                if "warning" in stderr_msg.lower():
+                    logger.debug(stderr_msg.strip())
         except subprocess.CalledProcessError as e:
-            error_lines = (e.stderr.decode() if e.stderr else "No stderr.").splitlines()[:10]
-            error_message = "\n".join(error_lines)
+            stderr_text = e.stderr.decode(errors="ignore") if e.stderr else "No stderr output."
+            first_lines = "\n".join(stderr_text.splitlines()[:10])
             logger.error(f"FFmpeg command failed: {' '.join(command)}")
-            logger.error(f"FFmpeg stderr: {error_message}")
-            raise FFmpegError(f"FFmpeg error: {error_message}")
+            logger.error(f"FFmpeg stderr:\n{first_lines}")
+            raise FFmpegError(f"FFmpeg execution error: {first_lines}")
 
     def load_image(self, image_path: Path) -> np.ndarray:
         if not image_path.is_file():
@@ -77,11 +81,16 @@ class VideoProcessor:
         logger.info(f"Image saved to: {output_path}")
 
     def get_framerate(self) -> float:
-        if not self.video_path: return 30.0
+        if not self.video_path:
+            return 30.0
         try:
             result = subprocess.run(
-                ["ffprobe", "-v", "0", "-of", "csv=p=0", "-select_streams", "v:0",
-                 "-show_entries", "stream=r_frame_rate", str(self.video_path)],
+                [
+                    "ffprobe", "-v", "0", "-of", "csv=p=0",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=r_frame_rate",
+                    str(self.video_path)
+                ],
                 capture_output=True, text=True, check=True
             )
             num, denom = map(int, result.stdout.strip().split('/'))
@@ -95,15 +104,15 @@ class VideoProcessor:
         self.frames_dir.mkdir()
         logger.info(f"Extracting frames from {self.video_path}...")
         frame_pattern = self.frames_dir / "frame_%06d.png"
-        
-        command = ["ffmpeg"]
+
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
         if start_time is not None:
             command.extend(["-ss", str(start_time)])
         command.extend(["-i", str(self.video_path)])
         if duration is not None:
             command.extend(["-t", str(duration)])
         command.extend(["-q:v", str(quality), str(frame_pattern)])
-        
+
         self._run_command(command)
         logger.info(f"Frames extracted to: {self.frames_dir}")
         return self.frames_dir
@@ -111,8 +120,12 @@ class VideoProcessor:
     def extract_audio(self) -> Path | None:
         logger.info(f"Extracting audio from {self.video_path}...")
         self.audio_path = self.temp_dir / "audio.aac"
-        command = ["ffmpeg", "-y", "-i", str(self.video_path), "-vn", "-c:a", "copy", str(self.audio_path)]
-        
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(self.video_path),
+            "-vn", "-acodec", "copy", str(self.audio_path)
+        ]
+
         try:
             self._run_command(command)
             if self.audio_path.exists() and self.audio_path.stat().st_size > 0:
@@ -120,19 +133,37 @@ class VideoProcessor:
                 return self.audio_path
             raise FFmpegError("Audio extraction produced an empty file.")
         except FFmpegError as e:
-            logger.warning(f"Audio extraction failed or no stream found: {e}")
+            logger.warning(f"Audio extraction failed or no audio stream found: {e}")
             self.audio_path = None
             return None
 
     def recombine_video(self, video_only_path: Path, output_path: Path, reencode: bool = False):
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        def _ffmpeg_supports_nvenc() -> bool:
+            try:
+                result = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-encoders"],
+                    capture_output=True, text=True, check=True
+                )
+                return "h264_nvenc" in result.stdout
+            except Exception:
+                return False
+
+        nvenc_available = _ffmpeg_supports_nvenc()
+        if nvenc_available:
+            logger.info("FFmpeg NVENC support detected — using GPU encoding.")
+        else:
+            logger.warning("FFmpeg NVENC not available — falling back to CPU encoding (libx264).")
+
+        encoder = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"] if nvenc_available else \
+                ["-c:v", "libx264", "-preset", "slow", "-crf", "18"]
+
         if not self.audio_path or not self.audio_path.exists():
-            logger.info("No audio to merge. Re-encoding video for size control (no audio present).")
+            logger.info("No audio stream detected — encoding video only.")
             self._run_command([
                 "ffmpeg", "-y", "-i", str(video_only_path),
-                "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart", str(output_path)
+                *encoder, "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output_path)
             ])
             logger.info("Video re-encoded (no audio).")
             return
@@ -140,20 +171,23 @@ class VideoProcessor:
         if reencode:
             logger.info("Re-encoding required — merging audio with re-encoded video...")
             command = [
-                "ffmpeg", "-y",
-                "-i", str(video_only_path), "-i", str(self.audio_path),
-                "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
+                "ffmpeg", "-y", "-i", str(video_only_path), "-i", str(self.audio_path),
+                *encoder, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart", "-shortest", str(output_path)
             ]
         else:
             logger.info("Merging audio using stream-copy (no re-encoding needed)...")
             command = [
-                "ffmpeg", "-y",
-                "-i", str(video_only_path), "-i", str(self.audio_path),
-                "-c:v", "copy", "-c:a", "copy",
-                "-movflags", "+faststart", "-shortest", str(output_path)
+                "ffmpeg", "-y", "-i", str(video_only_path), "-i", str(self.audio_path),
+                "-c:v", "copy", "-c:a", "copy", "-movflags", "+faststart", "-shortest", str(output_path)
             ]
 
-        self._run_command(command)
-        logger.info("Final video successfully written.")
+        try:
+            self._run_command(command)
+            logger.info("Final video successfully written.")
+        except FFmpegError as e:
+            if not reencode:
+                logger.warning(f"Stream-copy merge failed ({e}), retrying with re-encode fallback...")
+                self.recombine_video(video_only_path, output_path, reencode=True)
+            else:
+                raise

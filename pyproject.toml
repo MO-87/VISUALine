@@ -7,7 +7,7 @@ name = "visualine"
 version = "0.1.0"
 description = "An open-source AI suite for visual enhancement."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
     { name = "Mohamed Marzouk", email = "marzouk@vacts.net" },
@@ -19,8 +19,8 @@ authors = [
 ]
 
 dependencies = [
-    "torch",
-    "torchvision",
+    "torch==2.9.0",
+    "torchvision==0.24.0",
     "pyyaml",
     "streamlit",
     "fastapi",

@@ -41,7 +41,7 @@ class PipelineManager:
             self._max_workers = min(4, cpu_cores // 2)
 
     def load_pipeline(self, pipeline_config_path: Path) -> None:
-        """Loads pipeline configuration and builds node chain."""
+        """Loads pipeline configuration, builds the node chain, and runs setup for each node."""
         logger.info(f"Loading pipeline configuration from: {pipeline_config_path}")
         config = self._config_loader.load(pipeline_config_path)
         node_configs = config.get("pipeline", [])
@@ -50,33 +50,58 @@ class PipelineManager:
             logger.warning("Pipeline configuration is empty.")
             return
 
+        if self._pipeline:
+            logger.info("Tearing down the existing pipeline before loading a new one...")
+            for node in self._pipeline:
+                node.teardown()
+
         self._pipeline = [self._create_node_instance(cfg) for cfg in node_configs]
         logger.info(f"Loaded {len(self._pipeline)} nodes successfully.")
         for node in self._pipeline:
             logger.debug(f" -> Node: {repr(node)}")
 
+        logger.info("Setting up pipeline nodes...")
+        device_obj = torch.device(self.device)
+        for node in self._pipeline:
+            try:
+                node.setup(device=device_obj)
+            except Exception as e:
+                logger.error(f"Failed to setup node {node.node_name}: {e}", exc_info=True)
+                raise
+        logger.info("All nodes have been set up successfully.")
+
     def run(self, input_path: Path, output_path: Path) -> None:
-        """Runs the pipeline on either a single image, a directory of images, or a video file."""
+        """
+        Runs the pipeline on an input file/directory and ensures teardown is called afterward.
+        """
         if not self._pipeline:
             logger.error("No pipeline loaded — cannot run.")
             return
 
-        logger.info(f"Initialized PipelineManager on {self.device.upper()} | "
-            f"batch_size={self._batch_size}, max_workers={self._max_workers}")
+        try:
+            logger.info(f"Initialized PipelineManager on {self.device.upper()} | "
+                        f"batch_size={self._batch_size}, max_workers={self._max_workers}")
 
-        file_suffix = input_path.suffix.lower()
+            file_suffix = input_path.suffix.lower()
 
-        if input_path.is_dir():
-            logger.info(f"Detected image directory input: {input_path}")
-            self._run_image_batch(input_path, output_path)
-        elif file_suffix in SUPPORTED_IMAGE_EXTENSIONS:
-            logger.info(f"Detected single image input: {input_path}")
-            self._run_image(input_path, output_path)
-        elif file_suffix in SUPPORTED_VIDEO_EXTENSIONS:
-            logger.info(f"Detected video input: {input_path}")
-            self._run_video(input_path, output_path)
-        else:
-            raise ValueError(f"Unsupported file type: '{file_suffix}'.")
+            if input_path.is_dir():
+                logger.info(f"Detected image directory input: {input_path}")
+                self._run_image_batch(input_path, output_path)
+            elif file_suffix in SUPPORTED_IMAGE_EXTENSIONS:
+                logger.info(f"Detected single image input: {input_path}")
+                self._run_image(input_path, output_path)
+            elif file_suffix in SUPPORTED_VIDEO_EXTENSIONS:
+                logger.info(f"Detected video input: {input_path}")
+                self._run_video(input_path, output_path)
+            else:
+                raise ValueError(f"Unsupported file type: '{file_suffix}'.")
+        finally:
+            logger.info("Tearing down pipeline nodes...")
+            for node in self._pipeline:
+                node.teardown()
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+            logger.info("Pipeline teardown complete.")
 
     def _run_image(self, input_image_path: Path, output_image_path: Path) -> None:
         """Runs the pipeline on a single image."""

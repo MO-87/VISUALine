@@ -1,18 +1,17 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 
-import torch  ## the NodeBase is now based on PyTorch Tensors
+import torch
+import numpy as np
 
 class NodeBase(ABC):
     """
     Abstract Base Class for a pipeline processing node.
-
-    Each node in a pipeline must inherit from this class and implement the
-    `process` method, which operates on a batch of data as a PyTorch Tensor.
+    Each node is responsible for its own setup, processing, and teardown.
     """
     
     ## Flag for the TaskExecuter to identify node type.
-    ## Set to False in subclasses that only work with NumPy. (handled by TaskExecuter)
+    ## Set to False in subclasses that only work with NumPy arrays.
     use_torch: bool = True
 
     def __init__(self, config: Dict[str, Any]):
@@ -21,18 +20,37 @@ class NodeBase(ABC):
         """
         self.config = config
         self.node_name = self.__class__.__name__
+        self.is_setup = False
 
-    @abstractmethod
-    def process(self, batch: torch.Tensor) -> torch.Tensor:
+    def setup(self, device: torch.device):
         """
-        Processes a batch of data.
+        One-time setup for the node. Called once before processing starts.
+        Use this to load models, allocate resources, etc.
 
         Args:
-            batch (torch.Tensor): The input batch of frames or images as a
-                                  PyTorch Tensor of shape [B, C, H, W].
+            device (torch.device): The primary compute device (e.g., 'cuda' or 'cpu').
+        """
+        self.is_setup = True
+        pass
+
+    @abstractmethod
+    def process(self, data: Any) -> Any:
+        """
+        Processes a batch of data. The type of `data` will be a torch.Tensor
+        if use_torch is True, and a np.ndarray if use_torch is False.
+
+        Args:
+            data (Any): The input batch of frames or images.
 
         Returns:
-            torch.Tensor: The processed batch, also as a PyTorch Tensor.
+            Any: The processed batch, in the same format it was received.
+        """
+        pass
+
+    def teardown(self):
+        """
+        One-time cleanup for the node. Called once after processing is finished.
+        Use this to release memory or other resources.
         """
         pass
 

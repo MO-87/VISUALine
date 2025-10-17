@@ -29,10 +29,11 @@ class GrayscaleNode(NodeBase):
                                 of shape (B, H, W, C).
 
         Returns:
-            np.ndarray: The batch of grayscaled frames.
+            np.ndarray: The batch of grayscaled frames in RGB format
+                        of shape (B, H, W, 3).
         """
         ## must iterate through the batch.. as cv2.cvtColor works on single images
-        processed_frames = [cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in batch]
-        stacked_batch = np.stack(processed_frames)
+        gray_frames = [cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in batch]
+        stacked = np.stack(gray_frames)
 
-        return np.expand_dims(stacked_batch, axis=-1)
+        return np.expand_dims(stacked, axis=-1)

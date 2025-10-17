@@ -10,6 +10,7 @@ import threading
 import cv2
 import numpy as np
 import torch
+import av
 
 from visualine.core.config_loader import BaseConfigLoader
 from visualine.core.node_base import NodeBase
@@ -208,9 +209,8 @@ class PipelineManager:
                     int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 )
 
+                ## temporary encoded video path (we still write a file but encoded with PyAV)
                 temp_video_path = output_video_path.with_name(f"{output_video_path.stem}_temp_video.mp4")
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                out = cv2.VideoWriter(str(temp_video_path), fourcc, fps, (width, height))
 
                 ## init audio extraction in parallel
                 audio_thread = threading.Thread(target=processor.extract_audio)
@@ -239,16 +239,40 @@ class PipelineManager:
                             read_queue.put(frame_buffer)
                             frame_buffer = []
 
-                ## write thread (I/O bound)
+                ## write thread (uses PyAV now to encode frames to H.264)
                 def frame_writer():
-                    while True:
-                        item = write_queue.get()
-                        if item is stop_signal:
-                            break
-                        for img_rgb in item:
-                            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-                            out.write(img_bgr)
-                        write_queue.task_done()
+                    """
+                    Encode incoming RGB frames to H.264 using PyAV and write to temp_video_path.
+                    This preserves your original threading architecture while switching the encoder.
+                    """
+                    try:
+                        container = av.open(str(temp_video_path), mode="w")
+                        stream = container.add_stream("h264", rate=int(round(fps)))
+                        stream.width = width
+                        stream.height = height
+                        stream.pix_fmt = "yuv420p"
+                        ## keep ultrafast for speed.. tune for zero latency and CRF for quality/size
+                        stream.options = {"preset": "medium", "crf": "23"}
+
+                        while True:
+                            item = write_queue.get()
+                            if item is stop_signal:
+                                break
+                            for img_rgb in item:
+                                ## img_rgb shape: (H, W, 3) in RGB
+                                frame = av.VideoFrame.from_ndarray(img_rgb, format="rgb24")
+                                ## convert/encode frame and mux packets
+                                for packet in stream.encode(frame):
+                                    container.mux(packet)
+                            write_queue.task_done()
+
+                        ## flushing the encoder
+                        for packet in stream.encode():
+                            container.mux(packet)
+                        container.close()
+                    except Exception as e:
+                        logger.critical(f"PyAV writer thread failed: {e}", exc_info=True)
+                        raise
 
                 reader_thread = threading.Thread(target=frame_reader, daemon=True)
                 writer_thread = threading.Thread(target=frame_writer, daemon=True)
@@ -281,7 +305,6 @@ class PipelineManager:
                 write_queue.put(stop_signal)
                 writer_thread.join()
                 cap.release()
-                out.release()
 
                 ## wait for audio extraction to finish before merge
                 audio_thread.join()
@@ -319,7 +342,15 @@ class PipelineManager:
             with torch.no_grad():
                 processed_batch = self._safe_execute_batch(batch_tensor)
 
-            final_batch_rgb = processed_batch.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
+            final_batch_any_format = processed_batch.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
+
+            final_batch_rgb = []
+            for img in final_batch_any_format:
+                if img.shape[2] == 1: ## if the node returned a single-channel image
+                    final_batch_rgb.append(cv2.cvtColor(img, cv2.COLOR_GRAY2RGB))
+                else:
+                    final_batch_rgb.append(img)
+
             del batch_tensor, processed_batch
             if self._executer._use_cuda:
                 torch.cuda.empty_cache()

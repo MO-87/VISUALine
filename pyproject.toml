@@ -27,7 +27,8 @@ dependencies = [
     "uvicorn[standard]",
     "python-multipart",
     "opencv-python-headless",
-    "numpy"
+    "numpy",
+    "av"
 ]
 
 [project.optional-dependencies]

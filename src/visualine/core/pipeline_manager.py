@@ -129,35 +129,57 @@ class PipelineManager:
             logger.critical(f"Image pipeline run failed: {e}", exc_info=True)
 
     def _run_image_batch(self, input_dir: Path, output_dir: Path) -> None:
-        """Runs the pipeline on a directory of images using batched GPU-optimized processing."""
+        """
+        Groups images by resolution and runs the pipeline on each group to preserve aspect ratios.
+        """
         try:
             image_paths = sorted([p for p in input_dir.iterdir() if p.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS])
             if not image_paths:
                 raise FileNotFoundError(f"No supported images found in directory: {input_dir}")
 
-            logger.info(f"Running image batch pipeline on {len(image_paths)} images (batch={self._batch_size})...")
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            batch_buffer, batch_names = [], []
-            for idx, img_path in enumerate(image_paths, 1):
+            logger.info("Grouping images by resolution...")
+            images_by_size: Dict[tuple, list] = {}
+            for img_path in image_paths:
                 img_bgr = cv2.imread(str(img_path))
                 if img_bgr is None:
                     logger.warning(f"Skipping unreadable image: {img_path}")
                     continue
                 
-                img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-                batch_buffer.append(img)
-                batch_names.append(img_path.name)
-
-                if len(batch_buffer) >= self._batch_size:
-                    self._process_and_save_image_batch(batch_buffer, batch_names, output_dir)
-                    batch_buffer, batch_names = [], []
+                h, w, _ = img_bgr.shape
+                resolution = (w, h)
                 
-                if idx % 50 == 0 or idx == len(image_paths):
-                    logger.info(f"Progress: {idx}/{len(image_paths)} images processed.")
+                if resolution not in images_by_size:
+                    images_by_size[resolution] = []
+                
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                images_by_size[resolution].append((img_rgb, img_path.name))
 
-            if batch_buffer:
-                self._process_and_save_image_batch(batch_buffer, batch_names, output_dir)
+            logger.info(f"Found {len(images_by_size)} resolution groups to process.")
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            total_processed = 0
+            group_count = len(images_by_size)
+            for i, (resolution, image_list) in enumerate(images_by_size.items(), 1):
+                logger.info(
+                    f"Processing group {i}/{group_count}: "
+                    f"Resolution {resolution[0]}x{resolution[1]} ({len(image_list)} images)"
+                )
+                
+                batch_buffer, batch_names = [], []
+                for img_rgb, name in image_list:
+                    batch_buffer.append(img_rgb)
+                    batch_names.append(name)
+
+                    if len(batch_buffer) >= self._batch_size:
+                        self._process_and_save_image_batch(batch_buffer, batch_names, output_dir)
+                        total_processed += len(batch_buffer)
+                        batch_buffer, batch_names = [], []
+                
+                if batch_buffer:
+                    self._process_and_save_image_batch(batch_buffer, batch_names, output_dir)
+                    total_processed += len(batch_buffer)
+
+                logger.info(f"Progress: {total_processed}/{len(image_paths)} total images processed.")
 
             logger.info(f"Image directory pipeline completed successfully. Outputs saved to: {output_dir}")
         except Exception as e:

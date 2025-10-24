@@ -66,34 +66,35 @@ class ResourceManager:
         Returns:
             Any: The loaded model object, moved to the appropriate device.
         """
-        if model_name in self._model_cache:
-            self._model_cache.move_to_end(model_name)
-            logger.debug(f"Cache HIT for model: '{model_name}'")
-            return self._model_cache[model_name]
+        with self._lock:
+            if model_name in self._model_cache:
+                self._model_cache.move_to_end(model_name)
+                logger.debug(f"Cache HIT for model: '{model_name}'")
+                return self._model_cache[model_name]
 
-        logger.info(f"Cache MISS for model: '{model_name}'. Loading...")
+            logger.info(f"Cache MISS for model: '{model_name}'. Loading...")
 
-        ## evicting least recently used model if cache is full
-        if len(self._model_cache) >= self.cache_size:
-            self._evict_lru_model()
+            ## evicting least recently used model if cache is full
+            if len(self._model_cache) >= self.cache_size:
+                self._evict_lru_model()
 
-        ## loading the new model using the provided loader
-        model = model_loader()
-        
-        ## put model onto appropriate device (cuda if available)
-        target_device = device if torch.cuda.is_available() else "cpu"
-        if target_device == "cuda":
-            try:
-                model = model.to(target_device)
-                logger.info(f"Moved model '{model_name}' to {target_device}.")
-            except Exception as e:
-                logger.warning(f"Failed to move model '{model_name}' to {target_device}, keeping on CPU. Error: {e}")
-        
-        self._model_cache[model_name] = model
-        logger.info(f"Model '{model_name}' loaded and cached.")
-        self._log_cache_status()
+            ## loading the new model using the provided loader
+            model = model_loader()
+            
+            ## put model onto appropriate device (cuda if available)
+            target_device = device if torch.cuda.is_available() else "cpu"
+            if target_device == "cuda":
+                try:
+                    model = model.to(target_device)
+                    logger.info(f"Moved model '{model_name}' to {target_device}.")
+                except Exception as e:
+                    logger.warning(f"Failed to move model '{model_name}' to {target_device}, keeping on CPU. Error: {e}")
+            
+            self._model_cache[model_name] = model
+            logger.info(f"Model '{model_name}' loaded and cached.")
+            self._log_cache_status()
 
-        return model
+            return model
 
     def _evict_lru_model(self):
         """Evicts the least recently used model from the cache."""
@@ -114,17 +115,19 @@ class ResourceManager:
         ## lazy GPU memory release to reduce fragmentation
         del evicted_model
         if torch.cuda.is_available():
-            torch.cuda.ipc_collect()  ## More efficient cleanup before empty_cache()
+            torch.cuda.synchronize()  ## ensure all operations complete before cleanup
+            torch.cuda.ipc_collect()  ## more efficient cleanup before empty_cache()
             torch.cuda.empty_cache()
             
         self._log_cache_status()
 
     def clear_cache(self):
         """Clears all models from the cache, calling cleanup on each."""
-        model_names = list(self._model_cache.keys())
-        for model_name in model_names:
-            self._evict_lru_model()  ## evict one by one to trigger cleanup
-        logger.info("Resource cache cleared.")
+        with self._lock:
+            model_names = list(self._model_cache.keys())
+            for model_name in model_names:
+                self._evict_lru_model()  ## evict one by one to trigger cleanup
+            logger.info("Resource cache cleared.")
 
     def _log_cache_status(self):
         """Logs the current state of the model cache."""

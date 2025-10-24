@@ -1,0 +1,9 @@
+pipeline_name: "4K_Upscale_RealESRGAN"
+
+pipeline:
+  - class: "upscale.realesrgan_node.RealESRGANNode" # Path relative to 'visualine.nodes'
+    params:
+      model_filename: "RealESRGAN_x4plus.pth" # Added .pth extension
+      scale: 4                               # Explicitly defining scale (good practice)
+      tile_size: 0                         # Will be read by the node
+      fp16: true                             # Will be read by the node

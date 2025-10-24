@@ -2,7 +2,7 @@ import os
 import importlib
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor
 import queue
 import threading
@@ -115,7 +115,7 @@ class PipelineManager:
 
             tensor = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).float()
             if self._executer._use_cuda:
-                tensor = tensor.cuda(non_blocking=True)
+                tensor = tensor.pin_memory().cuda(non_blocking=True)
 
             processed_tensor = self._executer.execute_batch(self._pipeline, tensor)
 
@@ -190,7 +190,7 @@ class PipelineManager:
         try:
             batch_tensor = torch.from_numpy(np.stack(images)).permute(0, 3, 1, 2).float()
             if self._executer._use_cuda:
-                batch_tensor = batch_tensor.cuda(non_blocking=True)
+                batch_tensor = batch_tensor.pin_memory().cuda(non_blocking=True)
 
             processed_batch = self._executer.execute_batch(self._pipeline, batch_tensor)
             final_batch_rgb = processed_batch.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
@@ -213,7 +213,7 @@ class PipelineManager:
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             self._batch_size = max(1, self._batch_size // 2)
-            logger.warning(f"[WARNING] GPU OOM detected. Reducing batch size to {self._batch_size}.")
+            logger.warning(f"GPU OOM detected. Reducing batch size to {self._batch_size}.")
             raise
 
     def _run_video(self, input_video_path: Path, output_video_path: Path) -> None:
@@ -224,23 +224,44 @@ class PipelineManager:
                 if not cap.isOpened():
                     raise FileNotFoundError(f"Cannot open video: {input_video_path}")
 
-                fps, width, height, total_frames = (
-                    processor.get_framerate(),
-                    int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                    int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                    int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                )
+                fps = processor.get_framerate()
+                input_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                input_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+                ## determine output resolution by processing a sample frame through the entire pipeline
+                ret, first_frame_bgr = cap.read()
+                if not ret:
+                    raise ValueError("Cannot read first frame from video")
+                
+                first_frame_rgb = cv2.cvtColor(first_frame_bgr, cv2.COLOR_BGR2RGB)
+                sample_tensor = torch.from_numpy(first_frame_rgb).permute(2, 0, 1).unsqueeze(0).float()
+                
+                if self._executer._use_cuda:
+                    sample_tensor = sample_tensor.pin_memory().cuda(non_blocking=True)
+                
+                with torch.no_grad():
+                    processed_sample = self._executer.execute_batch(self._pipeline, sample_tensor)
+                    _, _, output_height, output_width = processed_sample.shape
+                
+                del sample_tensor, processed_sample
+                if self._executer._use_cuda:
+                    torch.cuda.empty_cache()
+                
+                logger.info(f"Input resolution: {input_width}x{input_height} -> Output resolution: {output_width}x{output_height}")
+                
+                ## reset video capture to start
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
                 ## temporary encoded video path (we still write a file but encoded with PyAV)
                 temp_video_path = output_video_path.with_name(f"{output_video_path.stem}_temp_video.mp4")
 
                 ## init audio extraction in parallel
-                audio_thread = threading.Thread(target=processor.extract_audio)
+                audio_thread = threading.Thread(target=processor.extract_audio, daemon=True)
                 audio_thread.start()
 
-                output_resolution = (width, height)
                 read_queue = queue.Queue(maxsize=4)
-                write_queue = queue.Queue()
+                write_queue = queue.Queue(maxsize=2)
                 stop_signal = object()
 
                 ## prefetch thread (I/O bound)
@@ -270,12 +291,13 @@ class PipelineManager:
                     try:
                         container = av.open(str(temp_video_path), mode="w")
                         stream = container.add_stream("h264", rate=int(round(fps)))
-                        stream.width = width
-                        stream.height = height
+                        stream.width = output_width
+                        stream.height = output_height
                         stream.pix_fmt = "yuv420p"
-                        ## keep ultrafast for speed.. tune for zero latency and CRF for quality/size
+                        ## balanced preset for speed/quality tradeoff with good compression
                         stream.options = {"preset": "medium", "crf": "23"}
 
+                        frames_written = 0
                         while True:
                             item = write_queue.get()
                             if item is stop_signal:
@@ -286,12 +308,14 @@ class PipelineManager:
                                 ## convert/encode frame and mux packets
                                 for packet in stream.encode(frame):
                                     container.mux(packet)
+                                frames_written += 1
                             write_queue.task_done()
 
                         ## flushing the encoder
                         for packet in stream.encode():
                             container.mux(packet)
                         container.close()
+                        logger.debug(f"Encoded {frames_written} frames to temporary video file.")
                     except Exception as e:
                         logger.critical(f"PyAV writer thread failed: {e}", exc_info=True)
                         raise
@@ -321,8 +345,9 @@ class PipelineManager:
 
                         future = executor.submit(self._process_video_batch_async, batch)
 
-                        if processed_frames % 50 == 0 and processed_frames > 0:
-                            logger.info(f"Progress: {processed_frames}/{total_frames} frames processed.")
+                        if processed_frames > 0 and processed_frames % 100 == 0:
+                            progress_pct = (processed_frames / total_frames) * 100
+                            logger.info(f"Progress: {processed_frames}/{total_frames} frames ({progress_pct:.1f}%)")
 
                 write_queue.put(stop_signal)
                 writer_thread.join()
@@ -333,13 +358,15 @@ class PipelineManager:
 
                 logger.info(f"Finished processing {processed_frames} frames.")
 
-                ## determine if re-encoding is needed
-                reencode_needed = output_resolution != (width, height)
+                ## determine if re-encoding is needed (resolution changed from input to output)
+                reencode_needed = (output_width, output_height) != (input_width, input_height)
                 if reencode_needed:
                     logger.info(
-                        f"Resolution changed from {width}x{height} → {output_resolution[0]}x{output_resolution[1]}. "
+                        f"Resolution changed from {input_width}x{input_height} to {output_width}x{output_height}. "
                         f"Re-encoding will be used."
                     )
+                else:
+                    logger.info(f"Resolution unchanged at {output_width}x{output_height}. Direct stream copy will be used.")
 
                 logger.info("Merging audio back into the final video...")
                 processor.recombine_video(
@@ -357,15 +384,16 @@ class PipelineManager:
     def _process_video_batch_async(self, frames: List[np.ndarray]) -> List[np.ndarray]:
         """Processes a batch of frames asynchronously."""
         try:
-            batch_tensor = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).float().pin_memory()
+            batch_tensor = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2).float()
             if self._executer._use_cuda:
-                batch_tensor = batch_tensor.cuda(non_blocking=True)
+                batch_tensor = batch_tensor.pin_memory().cuda(non_blocking=True)
 
             with torch.no_grad():
                 processed_batch = self._safe_execute_batch(batch_tensor)
 
             final_batch_any_format = processed_batch.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
 
+            ## convert single-channel outputs to RGB if needed
             final_batch_rgb = []
             for img in final_batch_any_format:
                 if img.shape[2] == 1: ## if the node returned a single-channel image
@@ -373,7 +401,7 @@ class PipelineManager:
                 else:
                     final_batch_rgb.append(img)
 
-            del batch_tensor, processed_batch
+            del batch_tensor, processed_batch, final_batch_any_format
             if self._executer._use_cuda:
                 torch.cuda.empty_cache()
 
@@ -407,13 +435,16 @@ class PipelineManager:
             )
     
     def _auto_select_batch_size(self):
-        base_size = 16
+        """Automatically selects optimal batch size based on available GPU VRAM."""
+        base_size = 4
         max_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         logger.info(f"GPU VRAM: {max_vram:.2f} GB")
 
-        if max_vram > 12:
-            return 64
-        elif max_vram > 8:
+        if max_vram >= 16:
             return 32
+        elif max_vram >= 10:
+            return 16
+        elif max_vram >= 6:
+            return 8
         else:
             return base_size

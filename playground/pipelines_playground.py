@@ -35,8 +35,8 @@ def main():
 
     # Define input and output paths
     input_video = DATA_DIR / "input" / "sample.mp4"
-    output_video = DATA_DIR / "output" / "sample_grayscaled.mp4"
-    pipeline_config = CONFIGS_DIR / "pipeline_configs" / "test_grayscale.yaml"
+    output_video = DATA_DIR / "output" / "sample_upscaled.mp4"
+    pipeline_config = CONFIGS_DIR / "pipeline_configs" / "test_upscale.yaml"
 
     # Check if input files exist
     if not input_video.exists():

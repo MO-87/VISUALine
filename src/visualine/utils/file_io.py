@@ -152,15 +152,15 @@ class VideoProcessor:
 
         nvenc_available = _ffmpeg_supports_nvenc()
         if nvenc_available:
-            logger.info("FFmpeg NVENC support detected — using GPU encoding.")
+            logger.info("FFmpeg NVENC support detected - using GPU encoding.")
         else:
-            logger.warning("FFmpeg NVENC not available — falling back to CPU encoding (libx264).")
+            logger.warning("FFmpeg NVENC not available - falling back to CPU encoding (libx264).")
 
         encoder = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"] if nvenc_available else \
                 ["-c:v", "libx264", "-preset", "slow", "-crf", "18"]
 
         if not self.audio_path or not self.audio_path.exists():
-            logger.info("No audio stream detected — encoding video only.")
+            logger.info("No audio stream detected - encoding video only.")
             self._run_command([
                 "ffmpeg", "-y", "-i", str(video_only_path),
                 *encoder, "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output_path)
@@ -169,7 +169,7 @@ class VideoProcessor:
             return
 
         if reencode:
-            logger.info("Re-encoding required — merging audio with re-encoded video...")
+            logger.info("Re-encoding required - merging audio with re-encoded video...")
             command = [
                 "ffmpeg", "-y", "-i", str(video_only_path), "-i", str(self.audio_path),
                 *encoder, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",

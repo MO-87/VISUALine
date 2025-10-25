@@ -43,6 +43,9 @@ dev = [
 visualine-ui = "visualine.app.main_app:main"
 visualine-api = "visualine.api.server:main"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.ruff]
 line-length = 120
 

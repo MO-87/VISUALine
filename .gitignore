@@ -56,6 +56,7 @@ htmlcov/
 # Machine Learning / Models
 # ======================
 *.pth
+*.pkl
 *.pt
 *.onnx
 *.h5

@@ -1,0 +1,8 @@
+pipeline_name: "2x_Interpolation_RIFE"
+
+pipeline:
+  - class: "interpolation.rife_node.RIFENode"
+    params:
+      model_filename: "flownet.pkl"
+      fp16: true  # Use fp16 for a big speed boost
+      scale: 1.0  # Use 1.0 for standard RIFE

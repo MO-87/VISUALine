@@ -19,6 +19,14 @@ class NodeBase(ABC):
     ## Set to True (default) for nodes that work with torch tensors.
     use_torch: bool = True
 
+    @property
+    def fps_multiplier(self) -> float:
+        """
+        Returns the factor by which this node changes the framerate.
+        1.0 means no change. 2.0 means 2x FPS.
+        """
+        return 1.0
+
     def __init__(self, config: Dict[str, Any]):
         """
         Initializes the node with its specific configuration.

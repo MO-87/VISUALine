@@ -268,7 +268,18 @@ class PipelineManager:
                 if not cap.isOpened():
                     raise FileNotFoundError(f"Cannot open video: {input_video_path}")
 
-                fps = processor.get_framerate()
+                ## calculate output FPS
+                input_fps = processor.get_framerate()
+                output_fps = input_fps
+                for node in self._pipeline:
+                    if hasattr(node, 'fps_multiplier'):
+                        output_fps *= node.fps_multiplier
+                
+                if output_fps != input_fps:
+                    logger.info(
+                        f"Pipeline will change FPS: {input_fps:.2f} -> {output_fps:.2f}"
+                    )
+
                 input_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 input_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -337,7 +348,8 @@ class PipelineManager:
                     """
                     try:
                         container = av.open(str(temp_video_path), mode="w")
-                        stream = container.add_stream("h264", rate=int(round(fps)))
+                        ## use output_fps for the stream
+                        stream = container.add_stream("h264", rate=int(round(output_fps)))
                         stream.width = output_width
                         stream.height = output_height
                         stream.pix_fmt = "yuv420p"
@@ -412,14 +424,22 @@ class PipelineManager:
                 logger.info(f"Finished processing {processed_frames} frames.")
 
                 ## determine if re-encoding is needed (resolution changed from input to output)
-                reencode_needed = (output_width, output_height) != (input_width, input_height)
+                resolution_changed = (output_width, output_height) != (input_width, input_height)
+                fps_changed = (output_fps != input_fps)
+                reencode_needed = resolution_changed or fps_changed
+                
                 if reencode_needed:
-                    logger.info(
-                        f"Resolution changed from {input_width}x{input_height} to {output_width}x{output_height}. "
-                        f"Re-encoding will be used."
-                    )
+                    logger.info("Re-encoding will be used (resolution or FPS changed).")
+                    if resolution_changed:
+                        logger.info(
+                            f"Resolution changed from {input_width}x{input_height} to {output_width}x{output_height}."
+                        )
+                    if fps_changed:
+                         logger.info(
+                            f"FPS changed from {input_fps:.2f} to {output_fps:.2f}."
+                        )
                 else:
-                    logger.info(f"Resolution unchanged at {output_width}x{output_height}. Direct stream copy will be used.")
+                    logger.info(f"Resolution and FPS unchanged. Direct stream copy will be used.")
 
                 logger.info("Merging audio back into the final video...")
                 processor.recombine_video(

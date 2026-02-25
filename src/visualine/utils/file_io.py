@@ -42,9 +42,11 @@ class VideoProcessor:
 
         command = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-thread_queue_size", "100000",
             "-f", "rawvideo", "-vcodec", "rawvideo", 
             "-s", f"{width}x{height}", "-pix_fmt", "rgb24", "-r", str(fps),
             "-i", "-", 
+            "-thread_queue_size", "100000",
             "-i", str(input_video_path),
             "-map", "0:v:0", "-map", "1:a:0?", 
             *encoder, "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",

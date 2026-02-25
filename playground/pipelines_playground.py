@@ -1,66 +1,115 @@
 import logging
-from pathlib import Path
+import tempfile
 import time
+from pathlib import Path
 
-# Important: We need to set up the logger before other imports
-# to ensure all modules use the same configuration.
-from visualine.core.config_loader import YamlConfigLoader
-from visualine.core.logger import setup_logger
+import streamlit as st
 
-# Find the project root to correctly locate config and data files
+st.set_page_config(
+    page_title="VISUALine Playground",
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIGS_DIR = PROJECT_ROOT / "configs"
+CONFIGS_DIR = PROJECT_ROOT / "configs" / "pipeline_configs"
 DATA_DIR = PROJECT_ROOT / "data"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-# 1. Setup Logging
-# We'll create a simple config here for the test. In a real app,
-# this would be loaded from base_config.yaml.
-log_config = {
-    "level": "INFO",
-    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-}
-setup_logger(log_config, LOGS_DIR)
-
-# Get the logger instance for this specific file
-logger = logging.getLogger(__name__)
-
-# Now we can import the rest of our system
+from visualine.core.config_loader import YamlConfigLoader
+from visualine.core.logger import setup_logger
 from visualine.core.pipeline_manager import PipelineManager
 
+if "logger_setup" not in st.session_state:
+    log_config = {
+        "level": "INFO",
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    }
+    setup_logger(log_config, LOGS_DIR)
+    st.session_state.logger_setup = True
 
-def main():
-    """Main function to run the test pipeline."""
-    logger.info("========== Starting VISUALine Pipeline Test ==========")
+logger = logging.getLogger(__name__)
 
-    # Define input and output paths
-    input_video = DATA_DIR / "input" / "sample.mp4"
-    output_video = DATA_DIR / "output" / "sample_upscaled.mp4"
-    pipeline_config = CONFIGS_DIR / "pipeline_configs" / "test_upscale.yaml"
-
-    # Check if input files exist
-    if not input_video.exists():
-        logger.critical(f"Input video not found! Please place 'sample.mp4' in '{input_video.parent}'")
-        return
-    if not pipeline_config.exists():
-        logger.critical(f"Pipeline config not found at: {pipeline_config}")
-        return
-
-    # 2. Initialize Core Components
+@st.cache_resource
+def get_pipeline_manager():
     config_loader = YamlConfigLoader()
-    manager = PipelineManager(config_loader=config_loader)
+    return PipelineManager(config_loader=config_loader)
 
-    # 3. Load and Run the Pipeline
-    try:
-        t0 = time.time()
-        manager.load_pipeline(pipeline_config_path=pipeline_config)
-        manager.run(input_path=input_video, output_path=output_video)
-    except Exception as e:
-        logger.critical(f"An error occurred during the pipeline run: {e}", exc_info=True)
+def get_available_configs():
+    if not CONFIGS_DIR.exists():
+        return []
+    return [p.name for p in CONFIGS_DIR.glob("*.yaml")]
+
+st.title("🎬 VISUALine Interactive Playground")
+st.markdown("Test your video processing pipelines quickly without editing code.")
+
+with st.sidebar:
+    st.header("⚙️ Settings")
     
-    logger.info(f"Running Pipeline took: {time.time() - t0:.2f}s")
-    logger.info("========== VISUALine Pipeline Test Finished ==========")
+    available_configs = get_available_configs()
+    if not available_configs:
+        st.error(f"No configs found in {CONFIGS_DIR}. Please add some YAML files.")
+        st.stop()
+        
+    selected_config_name = st.radio(
+        "Select Pipeline Configuration:",
+        available_configs,
+        help="Switching this instantly changes the pipeline instructions."
+    )
+    
+    st.divider()
+    
+    st.header("📁 Input Video")
+    uploaded_file = st.file_uploader("Upload a custom video...", type=["mp4", "mov", "avi"])
+    
+    default_input_path = DATA_DIR / "input" / "sample.mp4"
+    if not uploaded_file and not default_input_path.exists():
+        st.warning(f"No upload provided and default '{default_input_path.name}' not found.")
+        
+    st.divider()
+    run_button = st.button("🚀 Run Pipeline", use_container_width=True, type="primary")
 
+if run_button:
+    if uploaded_file is not None:
+        input_suffix = Path(uploaded_file.name).suffix
+        temp_in = tempfile.NamedTemporaryFile(delete=False, suffix=input_suffix)
+        temp_in.write(uploaded_file.read())
+        temp_in.close()
+        input_video_path = Path(temp_in.name)
+    else:
+        input_video_path = default_input_path
 
-if __name__ == "__main__":
-    main()
+    temp_out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    temp_out.close()
+    output_video_path = Path(temp_out.name)
+    
+    pipeline_config_path = CONFIGS_DIR / selected_config_name
+    
+    with st.spinner(f"Running pipeline using `{selected_config_name}`..."):
+        try:
+            t0 = time.time()
+            manager = get_pipeline_manager()
+            manager.load_pipeline(pipeline_config_path=pipeline_config_path)
+            
+            manager.run(input_path=input_video_path, output_path=output_video_path)
+            
+            duration = time.time() - t0
+            st.success(f"✅ Processing complete in {duration:.2f} seconds!")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("Original Video")
+                with open(input_video_path, 'rb') as f:
+                    st.video(f.read())
+                    
+            with col2:
+                st.subheader("Processed Result")
+                with open(output_video_path, 'rb') as f:
+                    st.video(f.read())
+                
+        except Exception as e:
+            logger.exception("Pipeline failed.")
+            st.error(f"An error occurred: {e}")
+            st.exception(e)

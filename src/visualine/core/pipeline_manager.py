@@ -1,16 +1,13 @@
-import os
 import importlib
 import logging
-from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional
-from concurrent.futures import ThreadPoolExecutor
-import queue
 import threading
+import queue
+from pathlib import Path
+from typing import Any, Dict, List, Union
 
 import cv2
 import numpy as np
 import torch
-import av
 from tqdm import tqdm
 import warnings
 
@@ -19,7 +16,7 @@ warnings.filterwarnings("ignore")
 from visualine.core.config_loader import BaseConfigLoader
 from visualine.core.node_base import NodeBase
 from visualine.core.task_executer import TaskExecuter
-from visualine.utils.file_io import FFmpegError, VideoProcessor
+from visualine.utils.file_io import VideoProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -28,25 +25,31 @@ SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 
 class PipelineManager:
-    """High-level orchestrator for building and running a visual processing pipeline."""
 
     def __init__(self, config_loader: BaseConfigLoader, node_namespace: str = "visualine.nodes"):
         self._config_loader = config_loader
         self._node_namespace = node_namespace
         self._pipeline: List[NodeBase] = []
         self._executer = TaskExecuter()
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        if self.device == "cuda":
-            self._batch_size = self._auto_select_batch_size()  ## increase/decrease if you have high/low VRAM
-            self._max_workers = 1  ## GPU-bound workloads benefit from single worker
+        
+        if torch.cuda.is_available():
+            self.device = "cuda"
+            self._batch_size = self._auto_select_batch_size()
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            self.device = "mps"
+            self._batch_size = 4
         else:
-            cpu_cores = os.cpu_count() or 4
-            self._batch_size = 8
-            self._max_workers = min(4, cpu_cores // 2)
+            self.device = "cpu"
+            self._batch_size = 2
+    
+    def _auto_select_batch_size(self):
+        max_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        if max_vram >= 20: return 64
+        elif max_vram >= 11: return 32
+        elif max_vram >= 7: return 16
+        return 4
 
     def load_pipeline(self, pipeline_config_path: Path) -> None:
-        """Loads pipeline configuration, builds the node chain, and runs setup for each node."""
         logger.info(f"Loading pipeline configuration from: {pipeline_config_path}")
         config = self._config_loader.load(pipeline_config_path)
         node_configs = config.get("pipeline", [])
@@ -62,9 +65,7 @@ class PipelineManager:
 
         self._pipeline = [self._create_node_instance(cfg) for cfg in node_configs]
         logger.info(f"Loaded {len(self._pipeline)} nodes successfully.")
-        for node in self._pipeline:
-            logger.debug(f" -> Node: {repr(node)}")
-
+        
         logger.info("Setting up pipeline nodes...")
         device_obj = torch.device(self.device)
         for node in self._pipeline:
@@ -73,20 +74,17 @@ class PipelineManager:
             except Exception as e:
                 logger.error(f"Failed to setup node {node.node_name}: {e}", exc_info=True)
                 raise
-        logger.info("All nodes have been set up successfully.")
+                
+        self._executer.compile(self._pipeline, input_format='numpy')
+        logger.info("All nodes set up and execution graph compiled successfully.")
 
     def run(self, input_path: Path, output_path: Path) -> None:
-        """
-        Runs the pipeline on an input file/directory and ensures teardown is called afterward.
-        """
         if not self._pipeline:
             logger.error("No pipeline loaded — cannot run.")
             return
 
         try:
-            logger.info(f"Initialized PipelineManager on {self.device.upper()} | "
-                        f"batch_size={self._batch_size}, max_workers={self._max_workers}")
-
+            logger.info(f"Initialized PipelineManager on {self.device.upper()} | batch_size={self._batch_size}")
             file_suffix = input_path.suffix.lower()
 
             if input_path.is_dir():
@@ -108,81 +106,79 @@ class PipelineManager:
                 torch.cuda.empty_cache()
             logger.info("Pipeline teardown complete.")
 
+    def _ensure_numpy_output(self, data: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
+        if isinstance(data, torch.Tensor):
+            if data.dtype != torch.uint8:
+                data = data.byte()
+            return data.permute(0, 2, 3, 1).contiguous().cpu().numpy()
+        return data
+
+    def _safe_execute_batch(self, batch_array: np.ndarray) -> Union[torch.Tensor, np.ndarray]:
+        try:
+            return self._executer(batch_array)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            batch_len = len(batch_array)
+            if batch_len > 1:
+                logger.warning(f"GPU OOM. Splitting batch of {batch_len} in half and retrying...")
+                mid = batch_len // 2
+                part1 = self._safe_execute_batch(batch_array[:mid])
+                part2 = self._safe_execute_batch(batch_array[mid:])
+                
+                if isinstance(part1, torch.Tensor):
+                    return torch.cat([part1, part2])
+                return np.concatenate([part1, part2])
+            else:
+                logger.critical("GPU OOM on a single frame. Cannot reduce batch size further.")
+                raise
+
     def _run_image(self, input_image_path: Path, output_image_path: Path) -> None:
-        """Runs the pipeline on a single image with optimized memory handling."""
         try:
             image_bgr = cv2.imread(str(input_image_path))
             if image_bgr is None:
                 raise FileNotFoundError(f"Cannot load image: {input_image_path}")
             
-            ## use numpy view for BGR->RGB conversion (faster than cv2.cvtColor)
-            image = image_bgr[..., ::-1].copy()
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            batch_array = np.expand_dims(image_rgb, axis=0)
 
-            tensor = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).float()
-            if self._executer._use_cuda:
-                tensor = tensor.pin_memory().cuda(non_blocking=True)
-
-            ## clear input array immediately after GPU transfer
-            del image, image_bgr
+            with torch.no_grad():
+                processed_batch = self._safe_execute_batch(batch_array)
             
-            processed_tensor = self._executer.execute_batch(self._pipeline, tensor)
-
-            ## convert output using numpy view for BGR conversion
-            final_image_rgb = processed_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-            final_image = final_image_rgb[..., ::-1].copy()  ## RGB -> BGR
-            
-            ## cleanup before I/O operation
-            del tensor, processed_tensor, final_image_rgb
-            if self._executer._use_cuda:
-                torch.cuda.empty_cache()
+            final_batch_rgb = self._ensure_numpy_output(processed_batch)
+            final_image_bgr = cv2.cvtColor(final_batch_rgb[0], cv2.COLOR_RGB2BGR)
             
             output_image_path.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(output_image_path), final_image)
+            cv2.imwrite(str(output_image_path), final_image_bgr)
 
             logger.info(f"Image pipeline completed successfully. Output saved to: {output_image_path}")
         except Exception as e:
             logger.critical(f"Image pipeline run failed: {e}", exc_info=True)
 
     def _run_image_batch(self, input_dir: Path, output_dir: Path) -> None:
-        """
-        Groups images by resolution and runs the pipeline on each group to preserve aspect ratios.
-        Optimized with efficient BGR->RGB conversion and better memory management.
-        """
         try:
             image_paths = sorted([p for p in input_dir.iterdir() if p.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS])
             if not image_paths:
                 raise FileNotFoundError(f"No supported images found in directory: {input_dir}")
 
-            logger.info("Grouping images by resolution...")
             images_by_size: Dict[tuple, list] = {}
             for img_path in image_paths:
                 img_bgr = cv2.imread(str(img_path))
                 if img_bgr is None:
-                    logger.warning(f"Skipping unreadable image: {img_path}")
                     continue
-                
                 h, w, _ = img_bgr.shape
                 resolution = (w, h)
-                
                 if resolution not in images_by_size:
                     images_by_size[resolution] = []
-                
-                ## use numpy view for faster BGR->RGB conversion
-                img_rgb = img_bgr[..., ::-1].copy()
+                    
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
                 images_by_size[resolution].append((img_rgb, img_path.name))
 
-            logger.info(f"Found {len(images_by_size)} resolution groups to process.")
             output_dir.mkdir(parents=True, exist_ok=True)
-
-            total_processed = 0
             group_count = len(images_by_size)
 
-            ## [TQDM] ADD: Wrap the main processing loop with tqdm
             with tqdm(total=len(image_paths), desc="Processing Images", unit="img", ncols=100) as pbar:
                 for i, (resolution, image_list) in enumerate(images_by_size.items(), 1):
-                    pbar.set_description(
-                        f"Group {i}/{group_count} ({resolution[0]}x{resolution[1]})"
-                    )
+                    pbar.set_description(f"Group {i}/{group_count} ({resolution[0]}x{resolution[1]})")
                     
                     batch_buffer, batch_names = [], []
                     for img_rgb, name in image_list:
@@ -191,317 +187,138 @@ class PipelineManager:
 
                         if len(batch_buffer) >= self._batch_size:
                             self._process_and_save_image_batch(batch_buffer, batch_names, output_dir)
-                            total_processed += len(batch_buffer)
-                            pbar.update(len(batch_buffer))  ## [TQDM] ADD: Update progress
+                            pbar.update(len(batch_buffer))
                             batch_buffer, batch_names = [], []
                     
                     if batch_buffer:
                         self._process_and_save_image_batch(batch_buffer, batch_names, output_dir)
-                        total_processed += len(batch_buffer)
-                        pbar.update(len(batch_buffer))  ## [TQDM] ADD: Update progress
+                        pbar.update(len(batch_buffer))
 
-                    ## [TQDM] COMMENT OUT: This log is replaced by the tqdm bar
-                    # logger.info(f"Progress: {total_processed}/{len(image_paths)} total images processed.")
-
-            logger.info(f"Image directory pipeline completed successfully. Outputs saved to: {output_dir}")
+            logger.info(f"Image directory pipeline completed. Outputs saved to: {output_dir}")
         except Exception as e:
             logger.critical(f"Image batch pipeline run failed: {e}", exc_info=True)
 
     def _process_and_save_image_batch(self, images: List[np.ndarray], names: List[str], output_dir: Path) -> None:
-        """
-        Processes and saves a batch of images with optimized memory management.
-        Uses numpy views for BGR conversion to minimize memory copies.
-        """
         try:
-            ## stack images into batch array
             batch_array = np.stack(images)
+            with torch.no_grad():
+                processed_batch = self._safe_execute_batch(batch_array)
             
-            ## convert to tensor and transfer to GPU
-            batch_tensor = torch.from_numpy(batch_array).permute(0, 3, 1, 2).float()
-            if self._executer._use_cuda:
-                batch_tensor = batch_tensor.pin_memory().cuda(non_blocking=True)
+            final_batch_rgb = self._ensure_numpy_output(processed_batch)
 
-            ## clear CPU array immediately after GPU transfer
-            del batch_array
-            
-            processed_batch = self._executer.execute_batch(self._pipeline, batch_tensor)
-            
-            ## clear GPU tensor before CPU conversion
-            del batch_tensor
-            if self._executer._use_cuda:
-                torch.cuda.synchronize()  ## ensure GPU operations complete before proceeding
-            
-            final_batch_rgb = processed_batch.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-            del processed_batch
-
-            ## save images with minimal memory footprint using numpy views
             for name, img_rgb in zip(names, final_batch_rgb):
                 out_path = output_dir / name
-                ## use numpy view for RGB->BGR (no copy)
-                img_bgr = img_rgb[..., ::-1]
+                img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(str(out_path), img_bgr)
 
-            del final_batch_rgb
-            if self._executer._use_cuda:
-                torch.cuda.empty_cache()
         except Exception as e:
             logger.error(f"Batch image processing failed: {e}", exc_info=True)
 
-    def _safe_execute_batch(self, batch_tensor):
-        """Executes a GPU batch safely with adaptive fallback in case of OOM."""
-        try:
-            return self._executer.execute_batch(self._pipeline, batch_tensor)
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            self._batch_size = max(1, self._batch_size // 2)
-            logger.warning(f"GPU OOM detected. Reducing batch size to {self._batch_size}.")
-            raise
-
     def _run_video(self, input_video_path: Path, output_video_path: Path) -> None:
-        """
-        Runs the pipeline on a video file using async batched GPU-optimized processing.
-        Optimized with larger queues, faster encoding preset, and efficient color conversions.
-        """
         try:
-            with VideoProcessor(input_video_path) as processor:
-                cap = cv2.VideoCapture(str(input_video_path))
-                if not cap.isOpened():
-                    raise FileNotFoundError(f"Cannot open video: {input_video_path}")
+            cap = cv2.VideoCapture(str(input_video_path))
+            if not cap.isOpened():
+                raise FileNotFoundError(f"Cannot open video: {input_video_path}")
 
-                ## calculate output FPS
-                input_fps = processor.get_framerate()
-                output_fps = input_fps
-                for node in self._pipeline:
-                    if hasattr(node, 'fps_multiplier'):
-                        output_fps *= node.fps_multiplier
-                
-                if output_fps != input_fps:
-                    logger.info(
-                        f"Pipeline will change FPS: {input_fps:.2f} -> {output_fps:.2f}"
-                    )
-
-                input_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                input_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-                ## determine output resolution by processing a sample frame through the entire pipeline
-                ret, first_frame_bgr = cap.read()
-                if not ret:
-                    raise ValueError("Cannot read first frame from video")
-                
-                ## use numpy view for BGR->RGB conversion
-                first_frame_rgb = first_frame_bgr[..., ::-1].copy()
-                sample_tensor = torch.from_numpy(first_frame_rgb).permute(2, 0, 1).unsqueeze(0).float()
-                
-                if self._executer._use_cuda:
-                    sample_tensor = sample_tensor.pin_memory().cuda(non_blocking=True)
-                
-                with torch.no_grad():
-                    processed_sample = self._executer.execute_batch(self._pipeline, sample_tensor)
-                    _, _, output_height, output_width = processed_sample.shape
-                
-                del first_frame_rgb, first_frame_bgr, sample_tensor, processed_sample
-                if self._executer._use_cuda:
-                    torch.cuda.empty_cache()
-                
-                logger.info(f"Input resolution: {input_width}x{input_height} -> Output resolution: {output_width}x{output_height}")
-                
-                ## reset video capture to start
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-                ## temporary encoded video path (encoded with PyAV)
-                temp_video_path = output_video_path.with_name(f"{output_video_path.stem}_temp_video.mp4")
-
-                ## init audio extraction in parallel
-                audio_thread = threading.Thread(target=processor.extract_audio, daemon=True)
-                audio_thread.start()
-
-                ## increased queue sizes for better pipeline throughput
-                read_queue = queue.Queue(maxsize=8)  ## was 4, now 8 for more buffering
-                write_queue = queue.Queue(maxsize=4)  ## was 2, now 4 for smoother encoding
-                stop_signal = object()
-
-                ## prefetch thread (I/O bound) - optimized with numpy view conversions
-                def frame_reader():
-                    frame_buffer = []
-                    while True:
-                        ret, frame_bgr = cap.read()
-                        if not ret:
-                            if frame_buffer:
-                                read_queue.put(frame_buffer)
-                            read_queue.put(stop_signal)
-                            break
-
-                        ## use numpy view for BGR->RGB conversion (faster)
-                        frame = frame_bgr[..., ::-1].copy()
-                        frame_buffer.append(frame)
-
-                        if len(frame_buffer) >= self._batch_size:
-                            read_queue.put(frame_buffer)
-                            frame_buffer = []
-
-                ## write thread (uses PyAV to encode frames to H.264)
-                def frame_writer():
-                    """
-                    Encode incoming RGB frames to H.264 using PyAV with optimized settings.
-                    Uses 'fast' preset for better encoding speed while maintaining quality.
-                    """
-                    try:
-                        container = av.open(str(temp_video_path), mode="w")
-                        ## use output_fps for the stream
-                        stream = container.add_stream("h264", rate=int(round(output_fps)))
-                        stream.width = output_width
-                        stream.height = output_height
-                        stream.pix_fmt = "yuv420p"
-                        ## 'fast' preset for better speed, crf=23 maintains good quality
-                        stream.options = {"preset": "fast", "crf": "23"}
-
-                        frames_written = 0
-                        while True:
-                            item = write_queue.get()
-                            if item is stop_signal:
-                                break
-                            for img_rgb in item:
-                                ## img_rgb shape: (H, W, 3) in RGB
-                                frame = av.VideoFrame.from_ndarray(img_rgb, format="rgb24")
-                                ## convert/encode frame and mux packets
-                                for packet in stream.encode(frame):
-                                    container.mux(packet)
-                                frames_written += 1
-                            write_queue.task_done()
-
-                        ## flush the encoder
-                        for packet in stream.encode():
-                            container.mux(packet)
-                        container.close()
-                        logger.debug(f"Encoded {frames_written} frames to temporary video file.")
-                    except Exception as e:
-                        logger.critical(f"PyAV writer thread failed: {e}", exc_info=True)
-                        raise
-
-                reader_thread = threading.Thread(target=frame_reader, daemon=True)
-                writer_thread = threading.Thread(target=frame_writer, daemon=True)
-                reader_thread.start()
-                writer_thread.start()
-
-                processed_frames = 0
-                ## [TQDM] ADD: Wrap the executor in a tqdm context manager
-                with ThreadPoolExecutor(max_workers=self._max_workers) as executor, \
-                     tqdm(total=total_frames, desc="Processing Video", unit="fr", ncols=100) as pbar:
-                    
-                    logger.info(f"Device: {self.device.upper()} | ThreadPool workers: {self._max_workers}")
-                    future = None
-                    while True:
-                        batch = read_queue.get()
-                        if batch is stop_signal:
-                            if future:
-                                results = future.result()
-                                write_queue.put(results)
-                                processed_frames += len(results)
-                                pbar.update(len(results))  ## [TQDM] ADD: Update progress
-                            break
-
-                        if future:
-                            results = future.result()
-                            write_queue.put(results)
-                            processed_frames += len(results)
-                            pbar.update(len(results))  ## [TQDM] ADD: Update progress
-
-                        future = executor.submit(self._process_video_batch_async, batch)
-
-                        ## [TQDM] COMMENT OUT: This logger info is now handled by tqdm
-                        # if processed_frames > 0 and processed_frames % 100 == 0:
-                        #     progress_pct = (processed_frames / total_frames) * 100
-                        #     logger.info(f"Progress: {processed_frames}/{total_frames} frames ({progress_pct:.1f}%)")
-
-                write_queue.put(stop_signal)
-                writer_thread.join()
-                cap.release()
-
-                ## wait for audio extraction to finish before merge
-                audio_thread.join()
-
-                logger.info(f"Finished processing {processed_frames} frames.")
-
-                ## determine if re-encoding is needed (resolution changed from input to output)
-                resolution_changed = (output_width, output_height) != (input_width, input_height)
-                fps_changed = (output_fps != input_fps)
-                reencode_needed = resolution_changed or fps_changed
-                
-                if reencode_needed:
-                    logger.info("Re-encoding will be used (resolution or FPS changed).")
-                    if resolution_changed:
-                        logger.info(
-                            f"Resolution changed from {input_width}x{input_height} to {output_width}x{output_height}."
-                        )
-                    if fps_changed:
-                         logger.info(
-                            f"FPS changed from {input_fps:.2f} to {output_fps:.2f}."
-                        )
-                else:
-                    logger.info(f"Resolution and FPS unchanged. Direct stream copy will be used.")
-
-                logger.info("Merging audio back into the final video...")
-                processor.recombine_video(
-                    video_only_path=temp_video_path,
-                    output_path=output_video_path,
-                    reencode=reencode_needed
-                )
-                temp_video_path.unlink(missing_ok=True)
-
-            logger.info(f"Video Pipeline completed successfully. Output saved to: {output_video_path}")
-
-        except (FFmpegError, Exception) as e:
-            logger.critical(f"Video Pipeline run failed: {e}", exc_info=True)
-
-    def _process_video_batch_async(self, frames: List[np.ndarray]) -> List[np.ndarray]:
-        """
-        Processes a batch of frames asynchronously with optimized memory management.
-        Uses cv2.cvtColor for color conversions as it's highly optimized.
-        """
-        try:
-            ## stack frames into batch array
-            batch_array = np.stack(frames)
+            processor = VideoProcessor()
+            input_fps = processor.get_framerate(input_video_path)
             
-            ## convert to tensor and transfer to GPU
-            batch_tensor = torch.from_numpy(batch_array).permute(0, 3, 1, 2).float()
-            if self._executer._use_cuda:
-                batch_tensor = batch_tensor.pin_memory().cuda(non_blocking=True)
+            output_fps = input_fps
+            for node in self._pipeline:
+                if hasattr(node, 'fps_multiplier'):
+                    output_fps *= node.fps_multiplier
 
-            ## clear CPU array immediately after GPU transfer
-            del batch_array
+            input_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            input_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            ret, first_frame_bgr = cap.read()
+            first_frame_rgb = cv2.cvtColor(first_frame_bgr, cv2.COLOR_BGR2RGB)
+            sample_array = np.expand_dims(first_frame_rgb, axis=0)
             
             with torch.no_grad():
-                processed_batch = self._safe_execute_batch(batch_tensor)
-
-            ## clear GPU tensor before CPU conversion
-            del batch_tensor
-            if self._executer._use_cuda:
-                torch.cuda.synchronize()
-
-            final_batch_any_format = processed_batch.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-            del processed_batch
-
-            ## convert single-channel outputs to RGB if needed
-            final_batch_rgb = []
-            for img in final_batch_any_format:
-                if img.shape[2] == 1:
-                    ## [OPTIMIZATION] Changed cv2.cvtColor to np.repeat for grayscale -> RGB
-                    final_batch_rgb.append(np.repeat(img, 3, axis=2))
+                processed_sample = self._executer(sample_array)
+                if isinstance(processed_sample, torch.Tensor):
+                    _, _, output_height, output_width = processed_sample.shape
                 else:
-                    final_batch_rgb.append(img)
+                    _, output_height, output_width, _ = processed_sample.shape
+            
+            del sample_array, processed_sample
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-            del final_batch_any_format
-            if self._executer._use_cuda:
-                torch.cuda.empty_cache()
+            read_queue = queue.Queue(maxsize=8)
+            write_queue = queue.Queue(maxsize=8)
+            stop_signal = object()
 
-            return final_batch_rgb
+            
+
+            def frame_reader():
+                batch_buffer = []
+                while True:
+                    ret, frame_bgr = cap.read()
+                    if not ret:
+                        if batch_buffer:
+                            read_queue.put(batch_buffer)
+                        read_queue.put(stop_signal)
+                        break
+
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    batch_buffer.append(frame_rgb)
+
+                    if len(batch_buffer) >= self._batch_size:
+                        read_queue.put(batch_buffer)
+                        batch_buffer = []
+
+            def frame_writer():
+                process = processor.get_ffmpeg_writer(
+                    input_video_path, output_video_path, output_width, output_height, output_fps
+                )
+                try:
+                    while True:
+                        batch = write_queue.get()
+                        if batch is stop_signal:
+                            break
+                        for img_rgb in batch:
+                            process.stdin.write(img_rgb.tobytes())
+                        write_queue.task_done()
+                finally:
+                    process.stdin.close()
+                    process.wait()
+
+            reader_thread = threading.Thread(target=frame_reader, daemon=True)
+            writer_thread = threading.Thread(target=frame_writer, daemon=True)
+            
+            reader_thread.start()
+            writer_thread.start()
+
+            with tqdm(total=total_frames, desc="Processing Video", unit="fr", ncols=100) as pbar:
+                while True:
+                    batch_list = read_queue.get()
+                    if batch_list is stop_signal:
+                        write_queue.put(stop_signal)
+                        break
+
+                    batch_array = np.stack(batch_list)
+
+                    with torch.no_grad():
+                        processed_batch = self._safe_execute_batch(batch_array)
+
+                    final_batch = self._ensure_numpy_output(processed_batch)
+                    
+                    if final_batch.shape[-1] == 1:
+                        final_batch = np.repeat(final_batch, 3, axis=-1)
+
+                    write_queue.put(final_batch)
+                    pbar.update(len(batch_list))
+
+            writer_thread.join()
+            cap.release()
+            logger.info("Video Pipeline completed successfully.")
+
         except Exception as e:
-            logger.error(f"Async batch video processing failed: {e}", exc_info=True)
-            return []
+            logger.critical(f"Video Pipeline run failed: {e}", exc_info=True)
 
     def _create_node_instance(self, node_config: Dict[str, Any]) -> NodeBase:
-        """Dynamically loads a node class based on the provided config."""
         class_path = node_config.get("class")
         if not class_path:
             raise ValueError("Node configuration missing 'class' key.")
@@ -523,18 +340,3 @@ class PipelineManager:
                 f"Could not load class '{class_name}' from module '{full_module_path}'. "
                 f"Check your pipeline configuration. Original error: {e}"
             )
-    
-    def _auto_select_batch_size(self):
-        """Automatically selects optimal batch size based on available GPU VRAM."""
-        base_size = 4
-        max_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        logger.info(f"GPU VRAM: {max_vram:.2f} GB")
-
-        if max_vram >= 16:
-            return 32
-        elif max_vram >= 10:
-            return 16
-        elif max_vram >= 6:
-            return 8
-        else:
-            return base_size

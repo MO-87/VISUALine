@@ -2,6 +2,7 @@ import logging
 import torch
 from realesrgan import RealESRGANer
 from basicsr.archs.rrdbnet_arch import RRDBNet
+from basicsr.archs.srvgg_arch import SRVGGNetCompact
 
 from visualine.models.loader import get_model_path
 from visualine.models.base_wrapper import BaseModelWrapper
@@ -19,9 +20,14 @@ class RealESRGANArchWrapper(BaseModelWrapper):
         self.upsampler: RealESRGANer | None = None
         self._device_str: str = 'cpu'
 
-        self.model_params = {
+        self.rrdb_params = {
             'num_in_ch': 3, 'num_out_ch': 3, 'num_feat': 64,
             'num_block': 23, 'num_grow_ch': 32, 'scale': self.scale
+        }
+        
+        self.srvgg_params = {
+            'num_in_ch': 3, 'num_out_ch': 3, 'num_feat': 64,
+            'num_conv': 16, 'upscale': self.scale, 'act_type': 'prelu'
         }
 
     def to(self, device: torch.device) -> 'RealESRGANArchWrapper':
@@ -30,7 +36,14 @@ class RealESRGANArchWrapper(BaseModelWrapper):
             self._device_str = target_device_str
             
             model_path_str = str(get_model_path(self.model_filename))
-            model_instance = RRDBNet(**self.model_params)
+            
+            filename_lower = self.model_filename.lower()
+            if "animevideo" in filename_lower or "compact" in filename_lower:
+                logger.info("Fast Video Model detected. Booting SRVGGNetCompact engine...")
+                model_instance = SRVGGNetCompact(**self.srvgg_params)
+            else:
+                logger.info("Heavy Photo Model detected. Booting RRDBNet engine...")
+                model_instance = RRDBNet(**self.rrdb_params)
             
             model_instance.eval()
             for param in model_instance.parameters():
@@ -44,12 +57,14 @@ class RealESRGANArchWrapper(BaseModelWrapper):
                 half=self.half,
                 device=self._device_str
             )
-            logger.info(f"RealESRGAN loaded on {self._device_str}. Tile: {self.tile}, FP16: {self.half}")
+            logger.info(f"Model loaded on {self._device_str}. Tile: {self.tile}, FP16: {self.half}")
             
         return self
 
     @torch.inference_mode()
     def predict(self, batch_tensor: torch.Tensor) -> torch.Tensor:
+        batch_tensor = batch_tensor[:, [2, 1, 0], :, :]
+
         batch_tensor = batch_tensor / 255.0
         if self.half:
             batch_tensor = batch_tensor.half()
@@ -60,9 +75,13 @@ class RealESRGANArchWrapper(BaseModelWrapper):
             outs = []
             for i in range(batch_tensor.size(0)):
                 self.upsampler.img = batch_tensor[i].unsqueeze(0)
-                self.upsampler.process()
+                self.upsampler.process() 
                 outs.append(self.upsampler.output.squeeze(0))
             out = torch.stack(outs)
+
+        out = torch.clamp(out, 0.0, 1.0)
+        
+        out = out[:, [2, 1, 0], :, :]
 
         return (out * 255.0).float()
 

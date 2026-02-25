@@ -4,21 +4,20 @@ import torch
 
 from visualine.core.node_base import NodeBase
 from visualine.core.resource_manager import ResourceManager
-from visualine.models.archs.realesrgan_wrapper import RealESRGANArchWrapper
+from visualine.models.archs.colorization_wrapper import DDColorArchWrapper
 
 logger = logging.getLogger(__name__)
 
-class RealESRGANNode(NodeBase):
+class ColorizationNode(NodeBase):
     use_torch: bool = True
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.model_filename: str = self.config.get("model_filename", "RealESRGAN_x4plus.pth")
-        self.scale: int = self.config.get("scale", 4)
-        self.tile_size: int = self.config.get("tile_size", 0) 
-        self.fp16: bool = self.config.get("fp16", False) 
+        self.model_filename: str = self.config.get("model_filename", "colorizer_base.pth")
+        self.render_res: int = self.config.get("render_res", 512)
+        self.fp16: bool = self.config.get("fp16", True)
 
-        self.model_wrapper: RealESRGANArchWrapper | None = None
+        self.model_wrapper: DDColorArchWrapper | None = None
         self._resource_manager: ResourceManager = ResourceManager()
 
     def setup(self, device: torch.device) -> None:
@@ -26,14 +25,13 @@ class RealESRGANNode(NodeBase):
             return
 
         logger.info(f"Setting up {self.node_name}...")
-        model_cache_key = f"realesrgan_{self.model_filename}_s{self.scale}_t{self.tile_size}_fp16{self.fp16}"
+        model_cache_key = f"colorizer_{self.model_filename}_res{self.render_res}_fp16{self.fp16}"
 
         def model_loader():
-            return RealESRGANArchWrapper(
+            return DDColorArchWrapper(
                 model_filename=self.model_filename,
-                scale=self.scale,
-                tile=self.tile_size,
-                half=self.fp16
+                render_res=self.render_res,
+                fp16=self.fp16
             )
         
         self.model_wrapper = self._resource_manager.get_model(

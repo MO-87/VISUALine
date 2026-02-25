@@ -1,0 +1,8 @@
+pipeline_name: "4K_Upscale_RealESRGAN"
+
+pipeline:
+  - class: "colorize.colorization_node.ColorizationNode"
+    params:
+      model_filename: "ddcolor_artistic.pth"
+      render_res: 512
+      fp16: true

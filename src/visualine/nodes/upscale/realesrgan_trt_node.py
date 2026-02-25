@@ -84,6 +84,8 @@ class RealESRGAN_TRT_Node(NodeBase):
         
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        
+        logger.info(f"{self.node_name} evicting complete.")
 
     def teardown(self):
         self.cleanup()

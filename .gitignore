@@ -62,7 +62,8 @@ htmlcov/
 *.h5
 *.ckpt
 checkpoints/
-
+*.engine
+*.trt
 # ======================
 # IDE / Editor
 # ======================

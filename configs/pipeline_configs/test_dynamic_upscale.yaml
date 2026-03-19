@@ -1,13 +1,14 @@
-pipeline_name: "Dynamic_VSR_Upscale_Test"
+pipeline_name: "Dynamic_VSR_Fast_Debug"
 
 pipeline:
   - class: "upscale.dynamic_upscale_node.DynamicUpscaleNode"
     params:
-      model_filename: "RealESRGAN_x4plus.pth"
+      model_filename: "realesr-animevideov3.pth"
       scale: 4
-      threshold: 0.02
+      threshold: 0.05
       tile_size: 64
       padding: 16
       refresh_interval: 60
-      batch_size: 12
+      batch_size: 32
       fp16: true
+      debug_view: true

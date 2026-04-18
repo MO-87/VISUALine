@@ -32,22 +32,58 @@ class PipelineManager:
         self._pipeline: List[NodeBase] = []
         self._executer = TaskExecuter()
         
+        self._batch_size = 1
+        
         if torch.cuda.is_available():
             self.device = "cuda"
-            self._batch_size = self._auto_select_batch_size()
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             self.device = "mps"
-            self._batch_size = 4
         else:
             self.device = "cpu"
-            self._batch_size = 2
-    
-    def _auto_select_batch_size(self):
-        max_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        if max_vram >= 20: return 64
-        elif max_vram >= 11: return 32
-        elif max_vram >= 7: return 16
-        return 4
+            
+    def _calibrate_batch_size(self, sample_frame: np.ndarray, max_batch: int = 64) -> int:
+        if self.device != "cuda":
+            return 4 if self.device == "mps" else 2 
+
+        total_vram = torch.cuda.get_device_properties(0).total_memory
+        half_vram = total_vram * 0.5
+        
+        logger.info(f"Calibrating optimal batch size (Target limit: 50% of {total_vram / (1024**3):.1f} GB)...")
+        current_batch = 1
+        optimal_batch = 1
+
+        while current_batch <= max_batch:
+            try:
+                dummy_batch = np.repeat(np.expand_dims(sample_frame, axis=0), current_batch, axis=0)
+                
+                torch.cuda.reset_peak_memory_stats()
+
+                with torch.no_grad():
+                    _ = self._executer(dummy_batch)
+
+                peak_memory = torch.cuda.max_memory_allocated()
+                
+                del dummy_batch
+                torch.cuda.empty_cache()
+
+                if peak_memory > half_vram:
+                    logger.info(f"Batch size {current_batch} uses {peak_memory / (1024**3):.2f} GB (Exceeds 50% limit). Settling on {optimal_batch}.")
+                    break
+
+                optimal_batch = current_batch
+                logger.info(f"Calibration successful for batch size {current_batch} using {peak_memory / (1024**3):.2f} GB.")
+                
+                current_batch *= 2
+
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                logger.info(f"OOM detected at batch size {current_batch} before reaching 50% limit. Settling on {optimal_batch}.")
+                break
+            except Exception as e:
+                logger.warning(f"Calibration halted due to error: {e}")
+                break
+
+        return optimal_batch
 
     def load_pipeline(self, pipeline_config_path: Path) -> None:
         logger.info(f"Loading pipeline configuration from: {pipeline_config_path}")
@@ -180,6 +216,9 @@ class PipelineManager:
                 for i, (resolution, image_list) in enumerate(images_by_size.items(), 1):
                     pbar.set_description(f"Group {i}/{group_count} ({resolution[0]}x{resolution[1]})")
                     
+                    sample_frame = image_list[0][0]
+                    self._batch_size = self._calibrate_batch_size(sample_frame)
+                    
                     batch_buffer, batch_names = [], []
                     for img_rgb, name in image_list:
                         batch_buffer.append(img_rgb)
@@ -234,6 +273,9 @@ class PipelineManager:
 
             ret, first_frame_bgr = cap.read()
             first_frame_rgb = cv2.cvtColor(first_frame_bgr, cv2.COLOR_BGR2RGB)
+            
+            self._batch_size = self._calibrate_batch_size(first_frame_rgb)
+            
             sample_array = np.expand_dims(first_frame_rgb, axis=0)
             
             with torch.no_grad():
@@ -245,6 +287,10 @@ class PipelineManager:
             
             del sample_array, processed_sample
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+            read_queue = queue.Queue(maxsize=8)
+            write_queue = queue.Queue(maxsize=8)
+            stop_signal = object()
 
             read_queue = queue.Queue(maxsize=8)
             write_queue = queue.Queue(maxsize=8)

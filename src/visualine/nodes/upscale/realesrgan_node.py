@@ -15,8 +15,9 @@ class RealESRGANNode(NodeBase):
         super().__init__(config)
         self.model_filename: str = self.config.get("model_filename", "RealESRGAN_x4plus.pth")
         self.scale: int = self.config.get("scale", 4)
-        self.tile_size: int = self.config.get("tile_size", 0) 
-        self.fp16: bool = self.config.get("fp16", False) 
+        self.tile_size: int = self.config.get("tile_size", 512)
+        self.tile_pad: int = self.config.get("tile_pad", 10)
+        self.fp16: bool = self.config.get("fp16", True)
 
         self.model_wrapper: RealESRGANArchWrapper | None = None
         self._resource_manager: ResourceManager = ResourceManager()
@@ -26,13 +27,14 @@ class RealESRGANNode(NodeBase):
             return
 
         logger.info(f"Setting up {self.node_name}...")
-        model_cache_key = f"realesrgan_{self.model_filename}_s{self.scale}_t{self.tile_size}_fp16{self.fp16}"
+        model_cache_key = f"realesrgan_{self.model_filename}_s{self.scale}_t{self.tile_size}_p{self.tile_pad}_fp16{self.fp16}"
 
         def model_loader():
             return RealESRGANArchWrapper(
                 model_filename=self.model_filename,
                 scale=self.scale,
                 tile=self.tile_size,
+                tile_pad=self.tile_pad,
                 half=self.fp16
             )
         

@@ -1,0 +1,9 @@
+pipeline_name: "4X_Upscale_SPAN"
+
+pipeline:
+  - class: "upscale.span_node.SPANNode"
+    params:
+      model_filename: "spanx4_ch48.pth"
+      scale: 4
+      feature_channels: 48
+      fp16: true

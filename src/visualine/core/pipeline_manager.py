@@ -43,12 +43,14 @@ class PipelineManager:
             
     def _calibrate_batch_size(self, sample_frame: np.ndarray, max_batch: int = 64) -> int:
         if self.device != "cuda":
-            return 4 if self.device == "mps" else 2 
+            return 4 if self.device == "mps" else 2
+        
+        vram_thrshld = 0.50
 
         total_vram = torch.cuda.get_device_properties(0).total_memory
-        half_vram = total_vram * 0.5
+        part_vram = total_vram * vram_thrshld
         
-        logger.info(f"Calibrating optimal batch size (Target limit: 50% of {total_vram / (1024**3):.1f} GB)...")
+        logger.info(f"Calibrating optimal batch size (Target limit: {vram_thrshld * 100}% of {total_vram / (1024**3):.1f} GB)...")
         current_batch = 1
         optimal_batch = 1
 
@@ -66,8 +68,8 @@ class PipelineManager:
                 del dummy_batch
                 torch.cuda.empty_cache()
 
-                if peak_memory > half_vram:
-                    logger.info(f"Batch size {current_batch} uses {peak_memory / (1024**3):.2f} GB (Exceeds 50% limit). Settling on {optimal_batch}.")
+                if peak_memory > part_vram:
+                    logger.info(f"Batch size {current_batch} uses {peak_memory / (1024**3):.2f} GB (Exceeds {vram_thrshld * 100}% limit). Settling on {optimal_batch}.")
                     break
 
                 optimal_batch = current_batch
@@ -77,7 +79,7 @@ class PipelineManager:
 
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache()
-                logger.info(f"OOM detected at batch size {current_batch} before reaching 50% limit. Settling on {optimal_batch}.")
+                logger.info(f"OOM detected at batch size {current_batch} before reaching {vram_thrshld * 100}% limit. Settling on {optimal_batch}.")
                 break
             except Exception as e:
                 logger.warning(f"Calibration halted due to error: {e}")

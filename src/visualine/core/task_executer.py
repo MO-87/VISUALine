@@ -56,12 +56,25 @@ class TaskExecuter:
         if self._use_cuda:
             tensor = tensor.pin_memory().to(self.device, non_blocking=True)
             
-        tensor = tensor.permute(0, 3, 1, 2).contiguous().float()        
-        return tensor
+        ## dynamically handle Spatial (4D) vs Temporal (5D)
+        if tensor.ndim == 4:
+            ## (N, H, W, C) -> (N, C, H, W)
+            tensor = tensor.permute(0, 3, 1, 2)
+        elif tensor.ndim == 5:
+            ## (N, T, H, W, C) -> (N, T, C, H, W)
+            tensor = tensor.permute(0, 1, 4, 2, 3)
+            
+        return tensor.contiguous().float()
 
     def _optimized_torch_to_numpy(self, tensor: torch.Tensor) -> np.ndarray:
         if tensor.dtype != torch.uint8:
             tensor = tensor.byte() 
             
-        tensor = tensor.permute(0, 2, 3, 1).contiguous()
-        return tensor.cpu().numpy()
+        if tensor.ndim == 4:
+            ## (N, C, H, W) -> (N, H, W, C)
+            tensor = tensor.permute(0, 2, 3, 1)
+        elif tensor.ndim == 5:
+            ## (N, T, C, H, W) -> (N, T, H, W, C)
+            tensor = tensor.permute(0, 1, 3, 4, 2)
+            
+        return tensor.contiguous().cpu().numpy()

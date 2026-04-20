@@ -2,6 +2,7 @@ import importlib
 import logging
 import threading
 import queue
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
@@ -265,9 +266,15 @@ class PipelineManager:
             input_fps = processor.get_framerate(input_video_path)
             
             output_fps = input_fps
+            temporal_window = 1
+
             for node in self._pipeline:
                 if hasattr(node, 'fps_multiplier'):
                     output_fps *= node.fps_multiplier
+                if hasattr(node, 'temporal_window') and node.temporal_window > 1:
+                    temporal_window = max(temporal_window, node.temporal_window)
+
+            pad_frames = temporal_window // 2 if temporal_window > 1 else 0
 
             input_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             input_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -276,9 +283,14 @@ class PipelineManager:
             ret, first_frame_bgr = cap.read()
             first_frame_rgb = cv2.cvtColor(first_frame_bgr, cv2.COLOR_BGR2RGB)
             
-            self._batch_size = self._calibrate_batch_size(first_frame_rgb)
+            if temporal_window > 1:
+                sample_frame = np.stack([first_frame_rgb] * temporal_window)
+            else:
+                sample_frame = first_frame_rgb
+
+            self._batch_size = self._calibrate_batch_size(sample_frame)
             
-            sample_array = np.expand_dims(first_frame_rgb, axis=0)
+            sample_array = np.expand_dims(sample_frame, axis=0)
             
             with torch.no_grad():
                 processed_sample = self._executer(sample_array)
@@ -294,28 +306,62 @@ class PipelineManager:
             write_queue = queue.Queue(maxsize=8)
             stop_signal = object()
 
-            read_queue = queue.Queue(maxsize=8)
-            write_queue = queue.Queue(maxsize=8)
-            stop_signal = object()
-
-            
-
             def frame_reader():
+                buffer = deque(maxlen=temporal_window) if temporal_window > 1 else None
                 batch_buffer = []
-                while True:
-                    ret, frame_bgr = cap.read()
-                    if not ret:
-                        if batch_buffer:
-                            read_queue.put(batch_buffer)
-                        read_queue.put(stop_signal)
-                        break
 
-                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                ret, frame_bgr = cap.read()
+                if not ret:
+                    read_queue.put(stop_signal)
+                    return
+                
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+                if temporal_window > 1:
+                    for _ in range(pad_frames):
+                        buffer.append(frame_rgb)
+                    buffer.append(frame_rgb)
+                    
+                    for _ in range(pad_frames):
+                        ret, next_bgr = cap.read()
+                        if ret:
+                            buffer.append(cv2.cvtColor(next_bgr, cv2.COLOR_BGR2RGB))
+                        else:
+                            buffer.append(buffer[-1])
+                else:
                     batch_buffer.append(frame_rgb)
+
+                while True:
+                    if temporal_window > 1:
+                        batch_buffer.append(np.stack(list(buffer)))
 
                     if len(batch_buffer) >= self._batch_size:
                         read_queue.put(batch_buffer)
                         batch_buffer = []
+
+                    ret, frame_bgr = cap.read()
+                    if not ret:
+                        break
+                    
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    
+                    if temporal_window > 1:
+                        buffer.append(frame_rgb)
+                    else:
+                        batch_buffer.append(frame_rgb)
+
+                if temporal_window > 1:
+                    for _ in range(pad_frames):
+                        buffer.append(buffer[-1])
+                        batch_buffer.append(np.stack(list(buffer)))
+                        if len(batch_buffer) >= self._batch_size:
+                            read_queue.put(batch_buffer)
+                            batch_buffer = []
+
+                if batch_buffer:
+                    read_queue.put(batch_buffer)
+
+                read_queue.put(stop_signal)
 
             def frame_writer():
                 process = processor.get_ffmpeg_writer(

@@ -42,70 +42,6 @@ class PipelineManager:
         else:
             self.device = "cpu"
             
-    def _calibrate_batch_size(self, sample_frame: np.ndarray, max_batch: int = 256) -> int:
-        if self.device != "cuda":
-            return 4 if self.device == "mps" else 2
-        
-        vram_thrshld = 0.85
-        free_mem, total_mem = torch.cuda.mem_get_info()
-        available_vram = free_mem * vram_thrshld
-        
-        logger.info(f"Calibrating optimal batch size (Target limit: {vram_thrshld * 100}% of {total_mem / (1024**3):.1f} GB)...")
-
-        def test_batch_memory(b_size: int) -> int:
-            """Runs a dummy forward pass and returns peak memory usage."""
-            torch.cuda.reset_peak_memory_stats()
-            dummy_batch = np.repeat(np.expand_dims(sample_frame, axis=0), b_size, axis=0)
-            
-            try:
-                with torch.no_grad():
-                    tensor_dummy = self._prepare_tensor_input(dummy_batch)
-                    _ = self._executer(tensor_dummy)
-                
-                return torch.cuda.max_memory_allocated()
-            except torch.cuda.OutOfMemoryError:
-                return -1
-            finally:
-                del dummy_batch
-                if 'tensor_dummy' in locals():
-                    del tensor_dummy
-                torch.cuda.empty_cache()
-
-        mem_bs1 = test_batch_memory(1)
-        if mem_bs1 == -1 or mem_bs1 > available_vram:
-            logger.warning("VRAM limit exceeded at batch size 1. Defaulting to 1.")
-            return 1
-
-        mem_bs2 = test_batch_memory(2)
-        if mem_bs2 == -1 or mem_bs2 > available_vram:
-            logger.info("VRAM limit exceeded at batch size 2. Settling on 1.")
-            return 1
-
-        mem_per_sample = mem_bs2 - mem_bs1
-        overhead = mem_bs1 - mem_per_sample
-
-        if mem_per_sample <= 0:
-            logger.warning("Memory scaling is non-linear or cached. Falling back to batch size 2.")
-            return 2
-
-        predicted_batch = int((available_vram - overhead) / mem_per_sample)
-        predicted_batch = max(1, min(predicted_batch, max_batch))
-
-        optimal_batch = 1
-        while optimal_batch * 2 <= predicted_batch:
-            optimal_batch *= 2
-
-        logger.info(f"Math prediction: {predicted_batch}. Snapping to power of 2: {optimal_batch}.")
-
-        if optimal_batch > 2:
-            verify_mem = test_batch_memory(optimal_batch)
-            if verify_mem == -1 or verify_mem > available_vram:
-                logger.warning(f"Verification failed for {optimal_batch}. Falling back to {optimal_batch // 2}.")
-                return optimal_batch // 2
-            
-            logger.info(f"Calibration successful! Settled on {optimal_batch} using {verify_mem / (1024**3):.2f} GB.")
-        
-        return optimal_batch
 
     def load_pipeline(self, pipeline_config_path: Path) -> None:
         logger.info(f"Loading pipeline configuration from: {pipeline_config_path}")
@@ -254,7 +190,6 @@ class PipelineManager:
                     pbar.set_description(f"Group {i}/{group_count} ({resolution[0]}x{resolution[1]})")
                     
                     sample_frame = image_list[0][0]
-                    self._batch_size = self._calibrate_batch_size(sample_frame)
                     
                     batch_buffer, batch_names = [], []
                     for img_rgb, name in image_list:
@@ -322,7 +257,6 @@ class PipelineManager:
             else:
                 sample_frame = first_frame_rgb
 
-            self._batch_size = self._calibrate_batch_size(sample_frame)
             
             sample_array = np.expand_dims(sample_frame, axis=0)
             

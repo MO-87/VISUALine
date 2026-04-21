@@ -1,14 +1,17 @@
-pipeline_name: "Dynamic_VSR_Fast_Debug"
+pipeline_name: "Dynamic_Upscale_SPAN"
 
 pipeline:
   - class: "upscale.dynamic_upscale_node.DynamicUpscaleNode"
     params:
-      model_filename: "realesr-animevideov3.pth"
+      model_filename: "spanx4_ch48.pth"
+      model_type: "span"
       scale: 4
-      threshold: 0.05
+      feature_channels: 48
+      threshold: 0.01
       tile_size: 64
       padding: 16
       refresh_interval: 60
-      batch_size: 32
+      batch_size: 16
       fp16: true
       debug_view: true
+

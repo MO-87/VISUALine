@@ -2,11 +2,12 @@ import logging
 import math
 import torch
 import torch.nn.functional as F
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Union
 
 from visualine.core.node_base import NodeBase
 from visualine.core.resource_manager import ResourceManager
 from visualine.models.archs.realesrgan_wrapper import RealESRGANArchWrapper
+from visualine.models.archs.span_wrapper import SPANArchWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ class DynamicUpscaleNode(NodeBase):
     """
     An optimized node for dynamic VSR. Reduces Python overhead by using 
     vectorized tensor operations for tiling and stitching.
+    Supports both RealESRGAN and SPAN architectures.
     """
     use_torch: bool = True
 
@@ -21,14 +23,18 @@ class DynamicUpscaleNode(NodeBase):
         super().__init__(config)
         # Configuration parameters
         self.model_filename: str = self.config.get("model_filename", "realesr-animevideov3.pth")
+        self.model_type: str = self.config.get("model_type", "realesrgan").lower()
         self.scale: int = self.config.get("scale", 4)
-        self.threshold: float = self.config.get("threshold", 0.005)
+        self.threshold: float = self.config.get("threshold", 0.01)
         self.tile_size: int = self.config.get("tile_size", 32)
         self.padding: int = self.config.get("padding", 16)
         self.refresh_interval: int = self.config.get("refresh_interval", 60)
         self.batch_size: int = self.config.get("batch_size", 32)
         self.fp16: bool = self.config.get("fp16", True)
         self.debug_view: bool = self.config.get("debug_view", False)
+        
+        # SPAN specific
+        self.feature_channels: int = self.config.get("feature_channels", 48)
 
         # State for temporal logic
         self.prev_input: torch.Tensor | None = None
@@ -36,23 +42,37 @@ class DynamicUpscaleNode(NodeBase):
         self.frame_count: int = 0
         
         # Internals
-        self.model_wrapper: RealESRGANArchWrapper | None = None
+        self.model_wrapper: Union[RealESRGANArchWrapper, SPANArchWrapper, None] = None
         self._resource_manager: ResourceManager = ResourceManager()
         self.block_size = self.tile_size + 2 * self.padding
 
     def setup(self, device: torch.device) -> None:
         if self.is_setup:
             return
-        logger.info(f"Setting up {self.node_name} (Vectorized) with {self.model_filename}...")
-        model_cache_key = f"dynamic_vector_{self.model_filename}_s{self.scale}_fp16{self.fp16}"
+        
+        # Auto-detect model type if not explicitly provided
+        if "span" in self.model_filename.lower() and self.model_type == "realesrgan":
+            self.model_type = "span"
+            logger.info(f"Auto-detected SPAN model type for {self.model_filename}")
+
+        logger.info(f"Setting up {self.node_name} ({self.model_type.upper()}) with {self.model_filename}...")
+        model_cache_key = f"dynamic_vector_{self.model_type}_{self.model_filename}_s{self.scale}_fp16{self.fp16}"
 
         def model_loader():
-            return RealESRGANArchWrapper(
-                model_filename=self.model_filename,
-                scale=self.scale,
-                tile=0,
-                half=self.fp16
-            )
+            if self.model_type == "span":
+                return SPANArchWrapper(
+                    model_filename=self.model_filename,
+                    scale=self.scale,
+                    feature_channels=self.feature_channels,
+                    half=self.fp16
+                )
+            else: # Default to RealESRGAN
+                return RealESRGANArchWrapper(
+                    model_filename=self.model_filename,
+                    scale=self.scale,
+                    tile=0,
+                    half=self.fp16
+                )
         
         self.model_wrapper = self._resource_manager.get_model(
             model_name=model_cache_key,
@@ -67,7 +87,13 @@ class DynamicUpscaleNode(NodeBase):
             raise RuntimeError(f"{self.node_name} process called before successful setup.")
 
         device = batch.device
-        model = self.model_wrapper.upsampler.model
+        
+        # Extract the raw model from wrapper
+        if self.model_type == "span":
+            model = self.model_wrapper.model
+        else:
+            model = self.model_wrapper.upsampler.model
+            
         dtype = torch.float16 if self.fp16 else torch.float32
         
         batch_bgr = batch[:, [2, 1, 0], :, :].to(dtype)
@@ -129,34 +155,43 @@ class DynamicUpscaleNode(NodeBase):
                 s_p, e_p = self.padding * self.scale, (self.padding + self.tile_size) * self.scale
                 out_tiles_final = out_tiles_all[:, :, s_p:e_p, s_p:e_p]
                 
-                # Debug view: draw borders
-                if self.debug_view:
-                    out_tiles_final[:, :, 0, :] = 1.0
-                    out_tiles_final[:, :, -1, :] = 1.0
-                    out_tiles_final[:, :, :, 0] = 1.0
-                    out_tiles_final[:, :, :, -1] = 1.0
-
-                # Stitching
+                # Stitching (CLEAN VERSION)
                 out_ts = self.tile_size * self.scale
-                # Important: Unfold creates a view, but we want to write to the base tensor.
-                # We can reshape the base tensor to target the tiles directly.
+                # We reshape the base tensor to target the tiles directly.
                 curr_output_reshaped = curr_output.view(1, 3, rows, out_ts, cols, out_ts)
                 curr_output_reshaped = curr_output_reshaped.permute(0, 2, 4, 1, 3, 5).reshape(-1, 3, out_ts, out_ts)
                 
                 # Update only the active tiles
                 curr_output_reshaped[active_mask] = out_tiles_final
                 
-                # Restore original shape
+                # Re-stitch to original shape
                 curr_output = curr_output_reshaped.reshape(1, rows, cols, 3, out_ts, out_ts).permute(0, 3, 1, 4, 2, 5).reshape(1, 3, grid_h, grid_w)
 
             # Crop grid to actual output resolution
             curr_output_final = curr_output[:, :, :out_h, :out_w]
             
+            # STATE PERSISTENCE: Save clean output before drawing debug borders
             self.prev_input = curr_tensor.clone()
             self.prev_output = curr_output_final.clone()
             self.frame_count += 1
-            processed_frames.append(curr_output_final)
 
+            # DEBUG VIEW: Draw borders only on the current frame output
+            if self.debug_view and num_active > 0:
+                # Reuse the reshaped view to draw borders efficiently
+                # We use out_tiles_final and re-stitch to avoid complex slice logic
+                out_tiles_final[:, :, 0, :] = 1.0
+                out_tiles_final[:, :, -1, :] = 1.0
+                out_tiles_final[:, :, :, 0] = 1.0
+                out_tiles_final[:, :, :, -1] = 1.0
+                
+                curr_output_reshaped = curr_output.view(1, 3, rows, out_ts, cols, out_ts)
+                curr_output_reshaped = curr_output_reshaped.permute(0, 2, 4, 1, 3, 5).reshape(-1, 3, out_ts, out_ts)
+                curr_output_reshaped[active_mask] = out_tiles_final
+                
+                # Refresh curr_output_final view
+                curr_output_final = curr_output[:, :, :out_h, :out_w]
+
+            processed_frames.append(curr_output_final)
         # Back to RGB uint8
         final_batch_bgr = torch.cat(processed_frames, dim=0)
         final_batch_rgb = final_batch_bgr[:, [2, 1, 0], :, :]

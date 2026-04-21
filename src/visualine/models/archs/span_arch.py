@@ -192,21 +192,20 @@ class SPAB(nn.Module):
 
         return out, out1, sim_att
 
-@ARCH_REGISTRY.register()
 class SPAN(nn.Module):
     """
     Swift Parameter-free Attention Network for Efficient Super-Resolution
     """
 
     def __init__(self,
-                 num_in_ch,
-                 num_out_ch,
-                 feature_channels=48,
-                 upscale=4,
-                 bias=True,
-                 img_range=255.,
-                 rgb_mean=(0.4488, 0.4371, 0.4040)
-                 ):
+                num_in_ch,
+                num_out_ch,
+                feature_channels=48,
+                upscale=4,
+                bias=True,
+                img_range=255.,
+                rgb_mean=(0.4488, 0.4371, 0.4040)
+                ):
         super(SPAN, self).__init__()
 
         in_channels = num_in_ch
@@ -254,5 +253,9 @@ if __name__ == "__main__":
     model.eval()
     inputs = (torch.rand(1, 3, 256, 256).cuda(),)
     print(flop_count_table(FlopCountAnalysis(model, inputs)))
+
+# Manual registration to avoid double-registration error
+if 'SPAN' not in ARCH_REGISTRY:
+    ARCH_REGISTRY.register(SPAN)
 
 

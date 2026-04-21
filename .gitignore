@@ -59,6 +59,7 @@ htmlcov/
 *.pkl
 *.pt
 *.onnx
+*.onnx.data
 *.h5
 *.ckpt
 checkpoints/

@@ -105,8 +105,10 @@ class RIFENode(NodeBase):
             self.last_frame_buffer = data_norm[-1:].clone()
 
         ## RIFE requires padding.. (a mandatory stepp!!)
-        pad_h = (32 - (H % 32)) % 32
-        pad_w = (32 - (W % 32)) % 32
+        divisor = max(32, int(64.0 / self.scale))
+        
+        pad_h = (divisor - (H % divisor)) % divisor
+        pad_w = (divisor - (W % divisor)) % divisor
         data_padded = F.pad(input_data, (0, pad_w, 0, pad_h), mode='replicate')
 
         ## create input batches
@@ -122,18 +124,24 @@ class RIFENode(NodeBase):
         with autocast("cuda", enabled=self.fp16):
             _, _, merged = self.model(x, timestep=0.5, scale_list=scale_list)
         
-        interpolated_frames = merged[4] 
+        ## merged contains the interpolated frames
+        interpolated_frames = merged[-1]
 
         ## reconstruct the full framerate batch
         if is_first_batch:
+            ## interleave original(0 to B-1) and interpolated
+            ## result: [Orig0, Interp0, Orig1, Interp1, ... OrigB-1]
             original_frames = data_padded
             output_stack = torch.stack((original_frames[:-1], interpolated_frames), dim=1)
-            output_batch = output_stack.view(-1, C, H + pad_h, W + pad_w)
+            output_batch = output_stack.flatten(0, 1)
+            ## add the very last original frame to close the batch
             output_batch = torch.cat((output_batch, original_frames[-1:]), dim=0)
         else:
+            ## buffer already handled the first frame, so interleave Interp and Orig
+            ## result: [Interp0, Orig1, Interp1, Orig2, ... OrigB]
             original_frames_new = data_padded[1:]
             output_stack = torch.stack((interpolated_frames, original_frames_new), dim=1)
-            output_batch = output_stack.view(-1, C, H + pad_h, W + pad_w)
+            output_batch = output_stack.flatten(0, 1)
 
         ## un-pad the result
         final_output_norm = output_batch[:, :, :H, :W]

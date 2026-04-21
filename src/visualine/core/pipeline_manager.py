@@ -2,6 +2,7 @@ import importlib
 import logging
 import threading
 import queue
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
@@ -32,22 +33,79 @@ class PipelineManager:
         self._pipeline: List[NodeBase] = []
         self._executer = TaskExecuter()
         
+        self._batch_size = 1
+        
         if torch.cuda.is_available():
             self.device = "cuda"
-            self._batch_size = self._auto_select_batch_size()
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             self.device = "mps"
-            self._batch_size = 4
         else:
             self.device = "cpu"
-            self._batch_size = 2
-    
-    def _auto_select_batch_size(self):
-        max_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        if max_vram >= 20: return 64
-        elif max_vram >= 11: return 32
-        elif max_vram >= 7: return 16
-        return 4
+            
+    def _calibrate_batch_size(self, sample_frame: np.ndarray, max_batch: int = 256) -> int:
+        if self.device != "cuda":
+            return 4 if self.device == "mps" else 2
+        
+        vram_thrshld = 0.85
+        free_mem, total_mem = torch.cuda.mem_get_info()
+        available_vram = free_mem * vram_thrshld
+        
+        logger.info(f"Calibrating optimal batch size (Target limit: {vram_thrshld * 100}% of {total_mem / (1024**3):.1f} GB)...")
+
+        def test_batch_memory(b_size: int) -> int:
+            """Runs a dummy forward pass and returns peak memory usage."""
+            torch.cuda.reset_peak_memory_stats()
+            dummy_batch = np.repeat(np.expand_dims(sample_frame, axis=0), b_size, axis=0)
+            
+            try:
+                with torch.no_grad():
+                    tensor_dummy = self._prepare_tensor_input(dummy_batch)
+                    _ = self._executer(tensor_dummy)
+                
+                return torch.cuda.max_memory_allocated()
+            except torch.cuda.OutOfMemoryError:
+                return -1
+            finally:
+                del dummy_batch
+                if 'tensor_dummy' in locals():
+                    del tensor_dummy
+                torch.cuda.empty_cache()
+
+        mem_bs1 = test_batch_memory(1)
+        if mem_bs1 == -1 or mem_bs1 > available_vram:
+            logger.warning("VRAM limit exceeded at batch size 1. Defaulting to 1.")
+            return 1
+
+        mem_bs2 = test_batch_memory(2)
+        if mem_bs2 == -1 or mem_bs2 > available_vram:
+            logger.info("VRAM limit exceeded at batch size 2. Settling on 1.")
+            return 1
+
+        mem_per_sample = mem_bs2 - mem_bs1
+        overhead = mem_bs1 - mem_per_sample
+
+        if mem_per_sample <= 0:
+            logger.warning("Memory scaling is non-linear or cached. Falling back to batch size 2.")
+            return 2
+
+        predicted_batch = int((available_vram - overhead) / mem_per_sample)
+        predicted_batch = max(1, min(predicted_batch, max_batch))
+
+        optimal_batch = 1
+        while optimal_batch * 2 <= predicted_batch:
+            optimal_batch *= 2
+
+        logger.info(f"Math prediction: {predicted_batch}. Snapping to power of 2: {optimal_batch}.")
+
+        if optimal_batch > 2:
+            verify_mem = test_batch_memory(optimal_batch)
+            if verify_mem == -1 or verify_mem > available_vram:
+                logger.warning(f"Verification failed for {optimal_batch}. Falling back to {optimal_batch // 2}.")
+                return optimal_batch // 2
+            
+            logger.info(f"Calibration successful! Settled on {optimal_batch} using {verify_mem / (1024**3):.2f} GB.")
+        
+        return optimal_batch
 
     def load_pipeline(self, pipeline_config_path: Path) -> None:
         logger.info(f"Loading pipeline configuration from: {pipeline_config_path}")
@@ -75,7 +133,7 @@ class PipelineManager:
                 logger.error(f"Failed to setup node {node.node_name}: {e}", exc_info=True)
                 raise
                 
-        self._executer.compile(self._pipeline, input_format='numpy')
+        self._executer.compile(self._pipeline)
         logger.info("All nodes set up and execution graph compiled successfully.")
 
     def run(self, input_path: Path, output_path: Path) -> None:
@@ -106,16 +164,33 @@ class PipelineManager:
                 torch.cuda.empty_cache()
             logger.info("Pipeline teardown complete.")
 
+    def _prepare_tensor_input(self, batch_array: np.ndarray) -> torch.Tensor:
+        if batch_array.ndim == 4:
+            ## (B, H, W, C) -> (B, C, H, W)
+            batch_array = batch_array.transpose(0, 3, 1, 2)
+        elif batch_array.ndim == 5:
+            ## (B, T, H, W, C) -> (B, T, C, H, W)
+            batch_array = batch_array.transpose(0, 1, 4, 2, 3)
+            
+        tensor = torch.from_numpy(batch_array)
+        if self.device == "cuda":
+            tensor = tensor.pin_memory().to(self.device, non_blocking=True)
+        else:
+            tensor = tensor.to(self.device)
+            
+        return tensor.to(dtype=torch.float32, memory_format=torch.contiguous_format)
+
     def _ensure_numpy_output(self, data: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
         if isinstance(data, torch.Tensor):
             if data.dtype != torch.uint8:
-                data = data.byte()
+                data = data.to(torch.uint8)
             return data.permute(0, 2, 3, 1).contiguous().cpu().numpy()
         return data
 
-    def _safe_execute_batch(self, batch_array: np.ndarray) -> Union[torch.Tensor, np.ndarray]:
+    def _safe_execute_batch(self, batch_array: np.ndarray) -> torch.Tensor:
         try:
-            return self._executer(batch_array)
+            tensor_input = self._prepare_tensor_input(batch_array)
+            return self._executer(tensor_input)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             batch_len = len(batch_array)
@@ -125,9 +200,7 @@ class PipelineManager:
                 part1 = self._safe_execute_batch(batch_array[:mid])
                 part2 = self._safe_execute_batch(batch_array[mid:])
                 
-                if isinstance(part1, torch.Tensor):
-                    return torch.cat([part1, part2])
-                return np.concatenate([part1, part2])
+                return torch.cat([part1, part2])
             else:
                 logger.critical("GPU OOM on a single frame. Cannot reduce batch size further.")
                 raise
@@ -180,6 +253,9 @@ class PipelineManager:
                 for i, (resolution, image_list) in enumerate(images_by_size.items(), 1):
                     pbar.set_description(f"Group {i}/{group_count} ({resolution[0]}x{resolution[1]})")
                     
+                    sample_frame = image_list[0][0]
+                    self._batch_size = self._calibrate_batch_size(sample_frame)
+                    
                     batch_buffer, batch_names = [], []
                     for img_rgb, name in image_list:
                         batch_buffer.append(img_rgb)
@@ -224,9 +300,15 @@ class PipelineManager:
             input_fps = processor.get_framerate(input_video_path)
             
             output_fps = input_fps
+            temporal_window = 1
+
             for node in self._pipeline:
                 if hasattr(node, 'fps_multiplier'):
                     output_fps *= node.fps_multiplier
+                if hasattr(node, 'temporal_window') and node.temporal_window > 1:
+                    temporal_window = max(temporal_window, node.temporal_window)
+
+            pad_frames = temporal_window // 2 if temporal_window > 1 else 0
 
             input_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             input_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -234,10 +316,19 @@ class PipelineManager:
 
             ret, first_frame_bgr = cap.read()
             first_frame_rgb = cv2.cvtColor(first_frame_bgr, cv2.COLOR_BGR2RGB)
-            sample_array = np.expand_dims(first_frame_rgb, axis=0)
+            
+            if temporal_window > 1:
+                sample_frame = np.stack([first_frame_rgb] * temporal_window)
+            else:
+                sample_frame = first_frame_rgb
+
+            self._batch_size = self._calibrate_batch_size(sample_frame)
+            
+            sample_array = np.expand_dims(sample_frame, axis=0)
             
             with torch.no_grad():
-                processed_sample = self._executer(sample_array)
+                tensor_sample = self._prepare_tensor_input(sample_array)
+                processed_sample = self._executer(tensor_sample)
                 if isinstance(processed_sample, torch.Tensor):
                     _, _, output_height, output_width = processed_sample.shape
                 else:
@@ -250,24 +341,62 @@ class PipelineManager:
             write_queue = queue.Queue(maxsize=8)
             stop_signal = object()
 
-            
-
             def frame_reader():
+                buffer = deque(maxlen=temporal_window) if temporal_window > 1 else None
                 batch_buffer = []
-                while True:
-                    ret, frame_bgr = cap.read()
-                    if not ret:
-                        if batch_buffer:
-                            read_queue.put(batch_buffer)
-                        read_queue.put(stop_signal)
-                        break
 
-                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                ret, frame_bgr = cap.read()
+                if not ret:
+                    read_queue.put(stop_signal)
+                    return
+                
+                frame_rgb = frame_bgr[..., ::-1]
+
+                if temporal_window > 1:
+                    for _ in range(pad_frames):
+                        buffer.append(frame_rgb)
+                    buffer.append(frame_rgb)
+                    
+                    for _ in range(pad_frames):
+                        ret, next_bgr = cap.read()
+                        if ret:
+                            buffer.append(cv2.cvtColor(next_bgr, cv2.COLOR_BGR2RGB))
+                        else:
+                            buffer.append(buffer[-1])
+                else:
                     batch_buffer.append(frame_rgb)
 
+                while True:
+                    if temporal_window > 1:
+                        batch_buffer.append(np.stack(list(buffer)))
+
                     if len(batch_buffer) >= self._batch_size:
-                        read_queue.put(batch_buffer)
+                        read_queue.put(np.stack(batch_buffer))
                         batch_buffer = []
+
+                    ret, frame_bgr = cap.read()
+                    if not ret:
+                        break
+                    
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    
+                    if temporal_window > 1:
+                        buffer.append(frame_rgb)
+                    else:
+                        batch_buffer.append(frame_rgb)
+
+                if temporal_window > 1:
+                    for _ in range(pad_frames):
+                        buffer.append(buffer[-1])
+                        batch_buffer.append(np.stack(list(buffer)))
+                        if len(batch_buffer) >= self._batch_size:
+                            read_queue.put(np.stack(batch_buffer))
+                            batch_buffer = []
+
+                if batch_buffer:
+                    read_queue.put(np.stack(batch_buffer))
+
+                read_queue.put(stop_signal)
 
             def frame_writer():
                 process = processor.get_ffmpeg_writer(
@@ -278,8 +407,7 @@ class PipelineManager:
                         batch = write_queue.get()
                         if batch is stop_signal:
                             break
-                        for img_rgb in batch:
-                            process.stdin.write(img_rgb.tobytes())
+                        process.stdin.write(batch.tobytes())
                         write_queue.task_done()
                 finally:
                     process.stdin.close()
@@ -293,12 +421,10 @@ class PipelineManager:
 
             with tqdm(total=total_frames, desc="Processing Video", unit="fr", ncols=100) as pbar:
                 while True:
-                    batch_list = read_queue.get()
-                    if batch_list is stop_signal:
+                    batch_array = read_queue.get()
+                    if batch_array is stop_signal:
                         write_queue.put(stop_signal)
                         break
-
-                    batch_array = np.stack(batch_list)
 
                     with torch.no_grad():
                         processed_batch = self._safe_execute_batch(batch_array)
@@ -309,7 +435,7 @@ class PipelineManager:
                         final_batch = np.repeat(final_batch, 3, axis=-1)
 
                     write_queue.put(final_batch)
-                    pbar.update(len(batch_list))
+                    pbar.update(len(batch_array))
 
             writer_thread.join()
             cap.release()

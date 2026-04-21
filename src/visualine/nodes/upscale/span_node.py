@@ -4,22 +4,21 @@ import torch
 
 from visualine.core.node_base import NodeBase
 from visualine.core.resource_manager import ResourceManager
-from visualine.models.archs.realesrgan_wrapper import RealESRGANArchWrapper
+from visualine.models.archs.span_wrapper import SPANArchWrapper
 
 logger = logging.getLogger(__name__)
 
-class RealESRGANNode(NodeBase):
+class SPANNode(NodeBase):
     use_torch: bool = True
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.model_filename: str = self.config.get("model_filename", "RealESRGAN_x4plus.pth")
+        self.model_filename: str = self.config.get("model_filename", "SPAN_x4.pth")
         self.scale: int = self.config.get("scale", 4)
-        self.tile_size: int = self.config.get("tile_size", 512)
-        self.tile_pad: int = self.config.get("tile_pad", 10)
+        self.feature_channels: int = self.config.get("feature_channels", 48)
         self.fp16: bool = self.config.get("fp16", True)
 
-        self.model_wrapper: RealESRGANArchWrapper | None = None
+        self.model_wrapper: SPANArchWrapper | None = None
         self._resource_manager: ResourceManager = ResourceManager()
 
     def setup(self, device: torch.device) -> None:
@@ -27,14 +26,13 @@ class RealESRGANNode(NodeBase):
             return
 
         logger.info(f"Setting up {self.node_name}...")
-        model_cache_key = f"realesrgan_{self.model_filename}_s{self.scale}_t{self.tile_size}_p{self.tile_pad}_fp16{self.fp16}"
+        model_cache_key = f"span_{self.model_filename}_s{self.scale}_f{self.feature_channels}_fp16{self.fp16}"
 
         def model_loader():
-            return RealESRGANArchWrapper(
+            return SPANArchWrapper(
                 model_filename=self.model_filename,
                 scale=self.scale,
-                tile=self.tile_size,
-                tile_pad=self.tile_pad,
+                feature_channels=self.feature_channels,
                 half=self.fp16
             )
         

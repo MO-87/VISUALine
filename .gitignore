@@ -88,3 +88,4 @@ docker-compose.override.yml
 # Media
 # ======================
 *.mp4
+*.webm

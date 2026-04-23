@@ -44,6 +44,7 @@ dependencies = [
     "flow-vis",
     "kornia==0.8.2",
     "kornia-rs==0.1.10",
+    "pyinstaller"
 ]
 
 [project.optional-dependencies]

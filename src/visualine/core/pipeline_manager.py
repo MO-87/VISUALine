@@ -2,6 +2,7 @@ import importlib
 import logging
 import threading
 import queue
+import gc
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Union, Callable, Optional
@@ -109,12 +110,18 @@ class PipelineManager:
             batch_array = batch_array.transpose(0, 1, 4, 2, 3)
             
         tensor = torch.from_numpy(batch_array)
+        
+        if self.device in ["cuda", "mps"]:
+            target_dtype = torch.float16
+        else:
+            target_dtype = torch.float32  ## CPU requires float32 for most operations
+            
         if self.device == "cuda":
-            tensor = tensor.pin_memory().to(self.device, non_blocking=True)
+            tensor = tensor.to(self.device, non_blocking=True)
         else:
             tensor = tensor.to(self.device)
             
-        return tensor.to(dtype=torch.float32, memory_format=torch.contiguous_format)
+        return tensor.to(dtype=target_dtype, memory_format=torch.contiguous_format)
 
     def _ensure_numpy_output(self, data: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
         if isinstance(data, torch.Tensor):
@@ -127,18 +134,28 @@ class PipelineManager:
         try:
             tensor_input = self._prepare_tensor_input(batch_array)
             return self._executer(tensor_input)
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            batch_len = len(batch_array)
-            if batch_len > 1:
-                logger.warning(f"GPU OOM. Splitting batch of {batch_len} in half and retrying...")
-                mid = batch_len // 2
-                part1 = self._safe_execute_batch(batch_array[:mid])
-                part2 = self._safe_execute_batch(batch_array[mid:])
+        except (torch.cuda.OutOfMemoryError, RuntimeError, MemoryError) as e:
+            error_msg = str(e).lower()
+            if "out of memory" in error_msg or "oom" in error_msg or isinstance(e, MemoryError):
                 
-                return torch.cat([part1, part2])
+                if self.device == "cuda":
+                    torch.cuda.empty_cache()
+                elif self.device == "mps":
+                    torch.mps.empty_cache()
+                gc.collect()
+
+                batch_len = len(batch_array)
+                if batch_len > 1:
+                    logger.warning(f"Memory OOM. Splitting batch of {batch_len} in half and retrying...")
+                    mid = batch_len // 2
+                    part1 = self._safe_execute_batch(batch_array[:mid])
+                    part2 = self._safe_execute_batch(batch_array[mid:])
+                    
+                    return torch.cat([part1, part2])
+                else:
+                    logger.critical("OOM on a single frame. Cannot reduce batch size further.")
+                    raise
             else:
-                logger.critical("GPU OOM on a single frame. Cannot reduce batch size further.")
                 raise
 
     def _run_image(self, input_image_path: Path, output_image_path: Path, progress_callback: Optional[Callable[[int, int], None]] = None) -> None:
@@ -279,8 +296,8 @@ class PipelineManager:
             del sample_array, processed_sample
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-            read_queue = queue.Queue(maxsize=8)
-            write_queue = queue.Queue(maxsize=8)
+            read_queue = queue.Queue(maxsize=2)
+            write_queue = queue.Queue(maxsize=2)
             stop_signal = object()
 
             def frame_reader():
@@ -378,6 +395,8 @@ class PipelineManager:
 
                     write_queue.put(final_batch)
                     pbar.update(len(batch_array))
+
+                    del batch_array, processed_batch
 
                     if progress_callback:
                         progress_callback(pbar.n, total_frames)

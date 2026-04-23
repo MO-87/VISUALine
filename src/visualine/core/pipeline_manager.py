@@ -15,7 +15,7 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-from visualine.core.config_loader import BaseConfigLoader
+from visualine.core.config_loader import BaseConfigLoader, get_resource_path
 from visualine.core.node_base import NodeBase
 from visualine.core.task_executer import TaskExecuter
 from visualine.utils.file_io import VideoProcessor
@@ -46,7 +46,7 @@ class PipelineManager:
 
     def load_pipeline(self, pipeline_config_path: Path) -> None:
         logger.info(f"Loading pipeline configuration from: {pipeline_config_path}")
-        config = self._config_loader.load(pipeline_config_path)
+        config = self._config_loader.load(get_resource_path(pipeline_config_path))
         node_configs = config.get("pipeline", [])
 
         if not node_configs:

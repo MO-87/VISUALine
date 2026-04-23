@@ -1,7 +1,14 @@
-appId: com.electron.app
-productName: app
+appId: com.visualine.app
+productName: VISUALine
 directories:
   buildResources: build
+
+extraResources:
+  - from: "../../dist/visualine-api"
+    to: "visualine-api"
+    filter:
+      - "**/*"
+
 files:
   - '!**/.vscode/*'
   - '!src/*'
@@ -11,7 +18,7 @@ files:
 asarUnpack:
   - resources/**
 win:
-  executableName: app
+  executableName: VISUALine
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}

@@ -28,6 +28,7 @@ build/
 dist/
 *.egg-info/
 .eggs/
+*.spec
 
 # ======================
 # Logs / Runtime files

@@ -4,7 +4,7 @@ import threading
 import queue
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, Callable, Optional
 
 import cv2
 import numpy as np
@@ -72,7 +72,7 @@ class PipelineManager:
         self._executer.compile(self._pipeline)
         logger.info("All nodes set up and execution graph compiled successfully.")
 
-    def run(self, input_path: Path, output_path: Path) -> None:
+    def run(self, input_path: Path, output_path: Path, progress_callback: Optional[Callable[[int, int, str], None]] = None) -> None:
         if not self._pipeline:
             logger.error("No pipeline loaded — cannot run.")
             return
@@ -83,13 +83,13 @@ class PipelineManager:
 
             if input_path.is_dir():
                 logger.info(f"Detected image directory input: {input_path}")
-                self._run_image_batch(input_path, output_path)
+                self._run_image_batch(input_path, output_path, progress_callback)
             elif file_suffix in SUPPORTED_IMAGE_EXTENSIONS:
                 logger.info(f"Detected single image input: {input_path}")
-                self._run_image(input_path, output_path)
+                self._run_image(input_path, output_path, progress_callback)
             elif file_suffix in SUPPORTED_VIDEO_EXTENSIONS:
                 logger.info(f"Detected video input: {input_path}")
-                self._run_video(input_path, output_path)
+                self._run_video(input_path, output_path, progress_callback)
             else:
                 raise ValueError(f"Unsupported file type: '{file_suffix}'.")
         finally:
@@ -141,7 +141,7 @@ class PipelineManager:
                 logger.critical("GPU OOM on a single frame. Cannot reduce batch size further.")
                 raise
 
-    def _run_image(self, input_image_path: Path, output_image_path: Path) -> None:
+    def _run_image(self, input_image_path: Path, output_image_path: Path, progress_callback: Optional[Callable[[int, int], None]] = None) -> None:
         try:
             image_bgr = cv2.imread(str(input_image_path))
             if image_bgr is None:
@@ -159,14 +159,18 @@ class PipelineManager:
             output_image_path.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(output_image_path), final_image_bgr)
 
+            if progress_callback:
+                progress_callback(1, 1)
+
             logger.info(f"Image pipeline completed successfully. Output saved to: {output_image_path}")
         except Exception as e:
             logger.critical(f"Image pipeline run failed: {e}", exc_info=True)
 
-    def _run_image_batch(self, input_dir: Path, output_dir: Path) -> None:
+    def _run_image_batch(self, input_dir: Path, output_dir: Path, progress_callback: Optional[Callable[[int, int], None]] = None) -> None:
         try:
             image_paths = sorted([p for p in input_dir.iterdir() if p.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS])
-            if not image_paths:
+            total_images = len(image_paths)
+            if not total_images:
                 raise FileNotFoundError(f"No supported images found in directory: {input_dir}")
 
             images_by_size: Dict[tuple, list] = {}
@@ -185,7 +189,7 @@ class PipelineManager:
             output_dir.mkdir(parents=True, exist_ok=True)
             group_count = len(images_by_size)
 
-            with tqdm(total=len(image_paths), desc="Processing Images", unit="img", ncols=100) as pbar:
+            with tqdm(total=total_images, desc="Processing Images", unit="img", ncols=100) as pbar:
                 for i, (resolution, image_list) in enumerate(images_by_size.items(), 1):
                     pbar.set_description(f"Group {i}/{group_count} ({resolution[0]}x{resolution[1]})")
                     
@@ -199,11 +203,15 @@ class PipelineManager:
                         if len(batch_buffer) >= self._batch_size:
                             self._process_and_save_image_batch(batch_buffer, batch_names, output_dir)
                             pbar.update(len(batch_buffer))
+                            if progress_callback:
+                                progress_callback(pbar.n, total_images)
                             batch_buffer, batch_names = [], []
                     
                     if batch_buffer:
                         self._process_and_save_image_batch(batch_buffer, batch_names, output_dir)
                         pbar.update(len(batch_buffer))
+                        if progress_callback:
+                            progress_callback(pbar.n, total_images)
 
             logger.info(f"Image directory pipeline completed. Outputs saved to: {output_dir}")
         except Exception as e:
@@ -225,7 +233,7 @@ class PipelineManager:
         except Exception as e:
             logger.error(f"Batch image processing failed: {e}", exc_info=True)
 
-    def _run_video(self, input_video_path: Path, output_video_path: Path) -> None:
+    def _run_video(self, input_video_path: Path, output_video_path: Path, progress_callback: Optional[Callable[[int, int], None]] = None) -> None:
         try:
             cap = cv2.VideoCapture(str(input_video_path))
             if not cap.isOpened():
@@ -370,6 +378,9 @@ class PipelineManager:
 
                     write_queue.put(final_batch)
                     pbar.update(len(batch_array))
+
+                    if progress_callback:
+                        progress_callback(pbar.n, total_frames)
 
             writer_thread.join()
             cap.release()

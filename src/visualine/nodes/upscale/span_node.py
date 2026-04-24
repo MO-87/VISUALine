@@ -39,8 +39,11 @@ class SPANNode(NodeBase):
         self.model_wrapper = self._resource_manager.get_model(
             model_name=model_cache_key,
             model_loader=model_loader,
-            device=str(device)
+            device=str(device) 
         )
+        
+        self.model_wrapper.to(device)
+
         self.is_setup = True
         logger.info(f"{self.node_name} setup complete.")
 
@@ -52,6 +55,10 @@ class SPANNode(NodeBase):
 
     def teardown(self) -> None:
         logger.debug(f"Tearing down {self.node_name}...")
+        
+        if self.model_wrapper is not None:
+            self.model_wrapper.cleanup()
+            
         self.model_wrapper = None 
         self.is_setup = False
         logger.info(f"{self.node_name} teardown complete.")

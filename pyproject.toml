@@ -31,16 +31,11 @@ dependencies = [
     "av",
     "basicsr @ git+https://github.com/XPixelGroup/BasicSR.git",
     "realesrgan",
-    "tensorrt>=10.14.1.48.post1",
-    "onnxscript>=0.5.7",
-    "onnx>=1.20.0",
-    "onnx-simplifier>=0.4.36",
-    "onnxruntime>=1.23.2",
-    "onnxruntime-gpu>=1.23.2",
     "timm>=1.0.22",
     "einops>=0.8.1",
     "imageio[ffmpeg]",
     "matplotlib",
+    "thop",
     "flow-vis",
     "kornia==0.8.2",
     "kornia-rs==0.1.10",
@@ -68,3 +63,13 @@ select = ["E", "F", "W", "I"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/visualine"]
+
+
+[[tool.uv.index]]
+name = "pytorch-gpu"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-gpu" }
+torchvision = { index = "pytorch-gpu" }

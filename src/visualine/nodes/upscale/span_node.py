@@ -55,9 +55,6 @@ class SPANNode(NodeBase):
 
     def teardown(self) -> None:
         logger.debug(f"Tearing down {self.node_name}...")
-        
-        if self.model_wrapper is not None:
-            self.model_wrapper.cleanup()
             
         self.model_wrapper = None 
         self.is_setup = False

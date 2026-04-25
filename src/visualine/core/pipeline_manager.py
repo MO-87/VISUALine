@@ -114,23 +114,26 @@ class PipelineManager:
         if self.device == "cuda":
             tensor = tensor.pin_memory()
 
-        if self.device in ["cuda", "mps"]:
-            target_dtype = torch.float16
-            target_memory_format = torch.channels_last if self.device == "cuda" else torch.contiguous_format
+        if self.device == "cuda":
+            tensor = tensor.pin_memory()
+            target_memory_format = torch.channels_last
         else:
-            target_dtype = torch.float32  ## CPU requires float32 for most operations
             target_memory_format = torch.contiguous_format
 
         tensor = tensor.to(self.device, non_blocking=True)
-
-        return tensor.to(dtype=target_dtype, memory_format=target_memory_format)
+        return tensor.to(dtype=torch.float32, memory_format=target_memory_format)
 
     def _ensure_numpy_output(self, data: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
         if isinstance(data, torch.Tensor):
             if data.dtype != torch.uint8:
                 data = data.to(torch.uint8)
 
-            data = data.permute(0, 2, 3, 1).contiguous()
+            if data.ndim == 4:
+                ## (B, C, H, W) -> (B, H, W, C)
+                data = data.permute(0, 2, 3, 1).contiguous()
+            elif data.ndim == 5:
+                ## (B, T, C, H, W) -> (B, T, H, W, C)
+                data = data.permute(0, 1, 3, 4, 2).contiguous()
 
             return data.cpu().numpy()
         return data
@@ -162,6 +165,13 @@ class PipelineManager:
 
                     ## MOVE TO CPU IMMEDIATELY to free VRAM before concatenating!!
                     part1 = self._safe_execute_batch(batch_array[:mid]).cpu()
+
+                    if self.device == "cuda":
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                    elif self.device == "mps":
+                        torch.mps.empty_cache()
+                    
                     part2 = self._safe_execute_batch(batch_array[mid:]).cpu()
                     
                     return torch.cat([part1, part2])
@@ -417,6 +427,12 @@ class PipelineManager:
                         processed_batch = self._safe_execute_batch(batch_array)
 
                     final_batch = self._ensure_numpy_output(processed_batch)
+                    
+                    ## if output is still 5D (B, T, H, W, C), collapse it to 4D (B, H, W, C)..
+                    ## we extract the center frame corresponding to the current time step
+                    if final_batch.ndim == 5:
+                        target_idx = final_batch.shape[1] // 2
+                        final_batch = final_batch[:, target_idx, ...]
                     
                     if final_batch.shape[-1] == 1:
                         final_batch = np.repeat(final_batch, 3, axis=-1)

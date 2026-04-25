@@ -96,13 +96,11 @@ def pixelshuffle_block(in_channels,
 class Conv3XC(nn.Module):
     def __init__(self, c_in, c_out, gain1=1, gain2=0, s=1, bias=True, relu=False):
         super(Conv3XC, self).__init__()
-        self.weight_concat = None
-        self.bias_concat = None
         self.update_params_flag = False
-        self.stride = s
         self.has_relu = relu
         gain = gain1
 
+        # Keep these strictly so `load_state_dict` doesn't throw missing key errors
         self.sk = nn.Conv2d(in_channels=c_in, out_channels=c_out, kernel_size=1, padding=0, stride=s, bias=bias)
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels=c_in, out_channels=c_in * gain, kernel_size=1, padding=0, bias=bias),
@@ -116,6 +114,7 @@ class Conv3XC(nn.Module):
         self.update_params()
 
     def update_params(self):
+        # Math remains identical to ensure identical output
         w1 = self.conv[0].weight.data.clone().detach()
         b1 = self.conv[0].bias.data.clone().detach()
         w2 = self.conv[1].weight.data.clone().detach()
@@ -126,45 +125,42 @@ class Conv3XC(nn.Module):
         w = F.conv2d(w1.flip(2, 3).permute(1, 0, 2, 3), w2, padding=2, stride=1).flip(2, 3).permute(1, 0, 2, 3)
         b = (w2 * b1.reshape(1, -1, 1, 1)).sum((1, 2, 3)) + b2
 
-        self.weight_concat = F.conv2d(w.flip(2, 3).permute(1, 0, 2, 3), w3, padding=0, stride=1).flip(2, 3).permute(1, 0, 2, 3)
-        self.bias_concat = (w3 * b.reshape(1, -1, 1, 1)).sum((1, 2, 3)) + b3
+        weight_concat = F.conv2d(w.flip(2, 3).permute(1, 0, 2, 3), w3, padding=0, stride=1).flip(2, 3).permute(1, 0, 2, 3)
+        bias_concat = (w3 * b.reshape(1, -1, 1, 1)).sum((1, 2, 3)) + b3
 
         sk_w = self.sk.weight.data.clone().detach()
         sk_b = self.sk.bias.data.clone().detach()
-        target_kernel_size = 3
 
-        H_pixels_to_pad = (target_kernel_size - 1) // 2
-        W_pixels_to_pad = (target_kernel_size - 1) // 2
-        sk_w = F.pad(sk_w, [H_pixels_to_pad, H_pixels_to_pad, W_pixels_to_pad, W_pixels_to_pad])
+        # Simplified padding math
+        sk_w = F.pad(sk_w, [1, 1, 1, 1])
 
-        self.weight_concat = self.weight_concat + sk_w
-        self.bias_concat = self.bias_concat + sk_b
-
-        self.eval_conv.weight.data = self.weight_concat
-        self.eval_conv.bias.data = self.bias_concat
-
+        self.eval_conv.weight.data = weight_concat + sk_w
+        self.eval_conv.bias.data = bias_concat + sk_b
+        
+    def switch_to_deploy(self):
+        """NEW: Deletes training parameters to free up VRAM for inference."""
+        if hasattr(self, 'conv'):
+            self.update_params()
+            del self.conv
+            del self.sk
+            self.update_params_flag = True
 
     def forward(self, x):
-        if self.training:
-            pad = 1
-            x_pad = F.pad(x, (pad, pad, pad, pad), "constant", 0)
-            out = self.conv(x_pad) + self.sk(x)
-        else:
-            if not self.update_params_flag:
-                self.update_params()
-                self.update_params_flag = True
-            out = self.eval_conv(x)
+        # Stripped out the training logic entirely. Assumes switch_to_deploy was called.
+        if not self.update_params_flag:
+            self.update_params()
+            self.update_params_flag = True
+            
+        out = self.eval_conv(x)
 
         if self.has_relu:
-            out = F.leaky_relu(out, negative_slope=0.05)
+            # OPTIMIZATION: Made LeakyReLU inplace
+            out = F.leaky_relu(out, negative_slope=0.05, inplace=True)
         return out
 
+
 class SPAB(nn.Module):
-    def __init__(self,
-                 in_channels,
-                 mid_channels=None,
-                 out_channels=None,
-                 bias=False):
+    def __init__(self, in_channels, mid_channels=None, out_channels=None, bias=False):
         super(SPAB, self).__init__()
         if mid_channels is None:
             mid_channels = in_channels
@@ -176,37 +172,26 @@ class SPAB(nn.Module):
         self.c2_r = Conv3XC(mid_channels, mid_channels, gain1=2, s=1)
         self.c3_r = Conv3XC(mid_channels, out_channels, gain1=2, s=1)
         self.act1 = torch.nn.SiLU(inplace=True)
-        self.act2 = activation('lrelu', neg_slope=0.1, inplace=True)
 
     def forward(self, x):
-        out1 = (self.c1_r(x))
+        out1 = self.c1_r(x)
         out1_act = self.act1(out1)
 
-        out2 = (self.c2_r(out1_act))
+        out2 = self.c2_r(out1_act)
         out2_act = self.act1(out2)
 
-        out3 = (self.c3_r(out2_act))
+        out3 = self.c3_r(out2_act)
 
-        sim_att = torch.sigmoid(out3) - 0.5
-        out = (out3 + x) * sim_att
+        # OPTIMIZATION: Massive memory savings by utilizing in-place tensor math
+        sim_att = torch.sigmoid(out3).sub_(0.5) 
+        out = out3.add_(x).mul_(sim_att) # out3 is consumed here, saving a huge intermediate tensor
 
         return out, out1, sim_att
 
+
 @ARCH_REGISTRY.register()
 class SPAN(nn.Module):
-    """
-    Swift Parameter-free Attention Network for Efficient Super-Resolution
-    """
-
-    def __init__(self,
-                 num_in_ch,
-                 num_out_ch,
-                 feature_channels=48,
-                 upscale=4,
-                 bias=True,
-                 img_range=255.,
-                 rgb_mean=(0.4488, 0.4371, 0.4040)
-                 ):
+    def __init__(self, num_in_ch, num_out_ch, feature_channels=48, upscale=4, bias=True, img_range=255., rgb_mean=(0.4488, 0.4371, 0.4040)):
         super(SPAN, self).__init__()
 
         in_channels = num_in_ch
@@ -227,9 +212,15 @@ class SPAN(nn.Module):
 
         self.upsampler = pixelshuffle_block(feature_channels, out_channels, upscale_factor=upscale)
 
+    def switch_to_deploy(self):
+        """Iterates through all submodules and cleans up training parameters."""
+        for module in self.modules():
+            if module is not self and hasattr(module, 'switch_to_deploy'):
+                module.switch_to_deploy()
+
     def forward(self, x):
-        self.mean = self.mean.type_as(x)
-        x = (x - self.mean) * self.img_range
+        mean = self.mean.to(device=x.device, dtype=x.dtype)
+        x = x.sub(mean).mul_(self.img_range) 
 
         out_feature = self.conv_1(x)
 

@@ -36,6 +36,9 @@ class SPANArchWrapper(BaseModelWrapper):
         self.model.load_state_dict(state_dict, strict=True)
         self.model.eval()
         
+        logger.info("Purging training weights and switching SPAN to deploy mode...")
+        self.model.switch_to_deploy()
+        
         for param in self.model.parameters():
             param.requires_grad = False
 
@@ -57,7 +60,7 @@ class SPANArchWrapper(BaseModelWrapper):
             if self.half:
                 self.model = self.model.half()
 
-            logger.debug("Running dummy forward pass to fuse SPAN kernels...")
+            logger.debug("Running dummy forward pass to warm up cuDNN...")
             with torch.inference_mode():
                 dummy_input = torch.zeros(1, 3, 64, 64, device=device, dtype=torch.float16 if self.half else torch.float32)
                 dummy_input = dummy_input.to(memory_format=torch.channels_last)

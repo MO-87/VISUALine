@@ -14,11 +14,8 @@ logger = logging.getLogger(__name__)
 
 class RIFENode(NodeBase):
     """
-    VISUALine pipeline node for RIFE frame interpolation.
-    
-    This is a pure PyTorch node (use_torch=True) that processes
-    a batch of frames on the GPU. It takes B frames and outputs
-    (B * 2) - 1 frames, effectively doubling the framerate.
+    VISUALine pipeline node for RIFE frame interpolation..
+    it takes B frames and outputs (B * 2) - 1 frames, effectively doubling the framerate
     """
     
     use_torch: bool = True
@@ -63,6 +60,8 @@ class RIFENode(NodeBase):
                 
             if self.fp16:
                 model_instance.half()
+            
+            model_instance = model_instance.to(memory_format=torch.channels_last)
                 
             logger.info(f"IFNet model loaded from {self.model_filename}")
             return model_instance
@@ -84,76 +83,43 @@ class RIFENode(NodeBase):
         if not self.is_setup or self.model is None:
             raise RuntimeError(f"{self.node_name} process called before successful setup.")
 
-        ## handle fp16 and get original shape
-        if self.fp16:
-            data = data.half()
-        B, C, H, W = data.shape 
-        
-        ## normalize data to [0, 1] range
-        data_norm = data / 255.0
+        calc_dtype = torch.float16 if self.fp16 else torch.float32
+        data_norm = data.to(dtype=calc_dtype, copy=True).mul_(1.0 / 255.0)
 
-        ## stateful logic
-        is_first_batch = False
         if self.last_frame_buffer is None:
-            is_first_batch = True
-            ## use normalized data
-            input_data = data_norm
-            self.last_frame_buffer = data_norm[-1:].clone()
-        else:
-            ## prepend normalized buffer.. very important
-            input_data = torch.cat((self.last_frame_buffer, data_norm), dim=0)
-            self.last_frame_buffer = data_norm[-1:].clone()
+            self.last_frame_buffer = data_norm.clone()
+            return data.float() if self.fp16 else data
 
-        ## RIFE requires padding.. (a mandatory stepp!!)
-        divisor = max(32, int(64.0 / self.scale))
+        img0 = self.last_frame_buffer
+        img1 = data_norm
         
+        self.last_frame_buffer = data_norm.clone()
+
+        _, _, H, W = data.shape
+        divisor = max(32, int(64.0 / self.scale))
         pad_h = (divisor - (H % divisor)) % divisor
         pad_w = (divisor - (W % divisor)) % divisor
-        data_padded = F.pad(input_data, (0, pad_w, 0, pad_h), mode='replicate')
+        
+        if pad_h != 0 or pad_w != 0:
+            img0 = F.pad(img0, (0, pad_w, 0, pad_h), mode='replicate')
+            img1 = F.pad(img1, (0, pad_w, 0, pad_h), mode='replicate')
 
-        ## create input batches
-        img0 = data_padded[:-1]
-        img1 = data_padded[1:]
-        x = torch.cat((img0, img1), 1)
+        x = torch.cat((img0, img1), dim=1)
+        if x.is_cuda:
+            x = x.to(memory_format=torch.channels_last)
 
-        ## define scale list
-        scale_list = [16/self.scale, 8/self.scale, 4/self.scale, 2/self.scale, 1/self.scale]
+        scale_list = [16.0 / self.scale, 8.0 / self.scale, 4.0 / self.scale, 2.0 / self.scale, 1.0 / self.scale]
 
         ## run the model!!
         ## use autocast for mixed-precision stability
         with autocast("cuda", enabled=self.fp16):
-            _, _, merged = self.model(x, timestep=0.5, scale_list=scale_list)
+            interpolated_frame = self.model(x, timestep=0.5, scale_list=scale_list)[2][-1]
+
+        output_batch = torch.cat((interpolated_frame, img1), dim=0)
+
+        final_output = output_batch[..., :H, :W].mul_(255.0)
         
-        ## merged contains the interpolated frames
-        interpolated_frames = merged[-1]
-
-        ## reconstruct the full framerate batch
-        if is_first_batch:
-            ## interleave original(0 to B-1) and interpolated
-            ## result: [Orig0, Interp0, Orig1, Interp1, ... OrigB-1]
-            original_frames = data_padded
-            output_stack = torch.stack((original_frames[:-1], interpolated_frames), dim=1)
-            output_batch = output_stack.flatten(0, 1)
-            ## add the very last original frame to close the batch
-            output_batch = torch.cat((output_batch, original_frames[-1:]), dim=0)
-        else:
-            ## buffer already handled the first frame, so interleave Interp and Orig
-            ## result: [Interp0, Orig1, Interp1, Orig2, ... OrigB]
-            original_frames_new = data_padded[1:]
-            output_stack = torch.stack((interpolated_frames, original_frames_new), dim=1)
-            output_batch = output_stack.flatten(0, 1)
-
-        ## un-pad the result
-        final_output_norm = output_batch[:, :, :H, :W]
-
-        ## de-normalize data back to [0, 255] range
-        final_output = final_output_norm * 255.0
-        
-        ## return as fp32 for compatibility
-        if self.fp16:
-            final_output = final_output.float()
-            
-        return final_output
+        return final_output.float() if self.fp16 else final_output
 
     def teardown(self) -> None:
         logger.debug(f"Tearing down {self.node_name}...")

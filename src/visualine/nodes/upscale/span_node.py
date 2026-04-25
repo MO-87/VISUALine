@@ -51,7 +51,17 @@ class SPANNode(NodeBase):
         if not self.is_setup or self.model_wrapper is None:
             raise RuntimeError(f"{self.node_name} process called before successful setup.")
         
-        return self.model_wrapper.predict(data)
+        is_5d = data.ndim == 5
+        if is_5d:
+            B, T, C, H, W = data.shape
+            data = data.view(B * T, C, H, W)
+            
+        output = self.model_wrapper.predict(data)
+        
+        if is_5d:
+            output = output.view(B, T, output.shape[1], output.shape[2], output.shape[3])
+            
+        return output
 
     def teardown(self) -> None:
         logger.debug(f"Tearing down {self.node_name}...")

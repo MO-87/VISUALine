@@ -110,29 +110,41 @@ class PipelineManager:
             batch_array = batch_array.transpose(0, 1, 4, 2, 3)
             
         tensor = torch.from_numpy(batch_array)
-        
+
+        if self.device == "cuda":
+            tensor = tensor.pin_memory()
+
         if self.device in ["cuda", "mps"]:
             target_dtype = torch.float16
             target_memory_format = torch.channels_last if self.device == "cuda" else torch.contiguous_format
         else:
             target_dtype = torch.float32  ## CPU requires float32 for most operations
             target_memory_format = torch.contiguous_format
-            
-        tensor = tensor.to(self.device)
-            
+
+        tensor = tensor.to(self.device, non_blocking=True)
+
         return tensor.to(dtype=target_dtype, memory_format=target_memory_format)
 
     def _ensure_numpy_output(self, data: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
         if isinstance(data, torch.Tensor):
             if data.dtype != torch.uint8:
                 data = data.to(torch.uint8)
-            return data.permute(0, 2, 3, 1).contiguous().cpu().numpy()
+
+            data = data.permute(0, 2, 3, 1).contiguous()
+
+            return data.cpu().numpy()
         return data
 
     def _safe_execute_batch(self, batch_array: np.ndarray) -> torch.Tensor:
         try:
             tensor_input = self._prepare_tensor_input(batch_array)
-            return self._executer(tensor_input)
+
+            if self.device == "cuda":
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    return self._executer(tensor_input)
+            else:
+                return self._executer(tensor_input)
+
         except (torch.cuda.OutOfMemoryError, RuntimeError, MemoryError) as e:
             error_msg = str(e).lower()
             if "out of memory" in error_msg or "oom" in error_msg or isinstance(e, MemoryError):
@@ -145,7 +157,7 @@ class PipelineManager:
 
                 batch_len = len(batch_array)
                 if batch_len > 1:
-                    logger.warning(f"Memory OOM. Splitting batch of {batch_len} in half and retrying...")
+                    logger.warning(f"OOM: reducing batch size from {batch_len} → {batch_len // 2}")
                     mid = batch_len // 2
 
                     ## MOVE TO CPU IMMEDIATELY to free VRAM before concatenating!!
@@ -165,7 +177,7 @@ class PipelineManager:
             if image_bgr is None:
                 raise FileNotFoundError(f"Cannot load image: {input_image_path}")
             
-            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            image_rgb = image_bgr[..., ::-1].copy()
             batch_array = np.expand_dims(image_rgb, axis=0)
 
             with torch.no_grad():
@@ -201,7 +213,7 @@ class PipelineManager:
                 if resolution not in images_by_size:
                     images_by_size[resolution] = []
                     
-                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                img_rgb = img_bgr[..., ::-1].copy()
                 images_by_size[resolution].append((img_rgb, img_path.name))
 
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -253,12 +265,12 @@ class PipelineManager:
 
     def _run_video(self, input_video_path: Path, output_video_path: Path, progress_callback: Optional[Callable[[int, int], None]] = None) -> None:
         try:
-            cap = cv2.VideoCapture(str(input_video_path))
-            if not cap.isOpened():
-                raise FileNotFoundError(f"Cannot open video: {input_video_path}")
-
             processor = VideoProcessor()
-            input_fps = processor.get_framerate(input_video_path)
+            
+            max_ai_resolution = 1920 
+            reader_process, input_width, input_height, input_fps, total_frames = processor.get_ffmpeg_reader(
+                input_video_path, max_dimension=max_ai_resolution
+            )
             
             output_fps = input_fps
             temporal_window = 1
@@ -270,13 +282,14 @@ class PipelineManager:
                     temporal_window = max(temporal_window, node.temporal_window)
 
             pad_frames = temporal_window // 2 if temporal_window > 1 else 0
+            
+            frame_size = input_width * input_height * 3 
 
-            input_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            input_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-            ret, first_frame_bgr = cap.read()
-            first_frame_rgb = cv2.cvtColor(first_frame_bgr, cv2.COLOR_BGR2RGB)
+            raw_bytes = reader_process.stdout.read(frame_size)
+            if not raw_bytes:
+                raise RuntimeError("Failed to read the first frame from FFmpeg pipe.")
+            
+            first_frame_rgb = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((input_height, input_width, 3))
             
             if temporal_window > 1:
                 sample_frame = np.stack([first_frame_rgb] * temporal_window)
@@ -295,83 +308,95 @@ class PipelineManager:
                     _, output_height, output_width, _ = processed_sample.shape
             
             del sample_array, processed_sample
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-            read_queue = queue.Queue(maxsize=16) 
-            write_queue = queue.Queue(maxsize=16)
+            read_queue = queue.Queue(maxsize=4)
+            write_queue = queue.Queue(maxsize=4)
             stop_signal = object()
 
             def frame_reader():
-                buffer = deque(maxlen=temporal_window) if temporal_window > 1 else None
-                batch_buffer = []
+                try:
+                    buffer = deque(maxlen=temporal_window) if temporal_window > 1 else None
+                    batch_buffer = []
 
-                ret, frame_bgr = cap.read()
-                if not ret:
-                    read_queue.put(stop_signal)
-                    return
-                
-                frame_rgb = frame_bgr[..., ::-1]
-
-                if temporal_window > 1:
-                    for _ in range(pad_frames):
-                        buffer.append(frame_rgb)
-                    buffer.append(frame_rgb)
-                    
-                    for _ in range(pad_frames):
-                        ret, next_bgr = cap.read()
-                        if ret:
-                            buffer.append(cv2.cvtColor(next_bgr, cv2.COLOR_BGR2RGB))
-                        else:
-                            buffer.append(buffer[-1])
-                else:
-                    batch_buffer.append(frame_rgb)
-
-                while True:
                     if temporal_window > 1:
-                        batch_buffer.append(np.stack(list(buffer)))
-
-                    if len(batch_buffer) >= self._batch_size:
-                        read_queue.put(np.stack(batch_buffer))
-                        batch_buffer = []
-
-                    ret, frame_bgr = cap.read()
-                    if not ret:
-                        break
-                    
-                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                    
-                    if temporal_window > 1:
-                        buffer.append(frame_rgb)
+                        for _ in range(pad_frames):
+                            buffer.append(first_frame_rgb)
+                        buffer.append(first_frame_rgb)
+                        
+                        for _ in range(pad_frames):
+                            next_bytes = reader_process.stdout.read(frame_size)
+                            if next_bytes:
+                                buffer.append(np.frombuffer(next_bytes, dtype=np.uint8).reshape((input_height, input_width, 3)))
+                            else:
+                                buffer.append(buffer[-1])
                     else:
-                        batch_buffer.append(frame_rgb)
+                        batch_buffer.append(first_frame_rgb)
 
-                if temporal_window > 1:
-                    for _ in range(pad_frames):
-                        buffer.append(buffer[-1])
-                        batch_buffer.append(np.stack(list(buffer)))
+                    while True:
+                        if temporal_window > 1:
+                            batch_buffer.append(np.array(buffer))
+
                         if len(batch_buffer) >= self._batch_size:
                             read_queue.put(np.stack(batch_buffer))
                             batch_buffer = []
 
-                if batch_buffer:
-                    read_queue.put(np.stack(batch_buffer))
+                        raw_bytes = reader_process.stdout.read(frame_size)
+                        if not raw_bytes:
+                            break
+                        
+                        frame_rgb = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((input_height, input_width, 3))
+                        
+                        if temporal_window > 1:
+                            buffer.append(frame_rgb)
+                        else:
+                            batch_buffer.append(frame_rgb)
 
-                read_queue.put(stop_signal)
+                    if temporal_window > 1:
+                        for _ in range(pad_frames):
+                            buffer.append(buffer[-1])
+                            batch_buffer.append(np.stack(list(buffer)))
+                            if len(batch_buffer) >= self._batch_size:
+                                read_queue.put(np.stack(batch_buffer))
+                                batch_buffer = []
+
+                    if batch_buffer:
+                        read_queue.put(np.stack(batch_buffer))
+
+                finally:
+                    read_queue.put(stop_signal)
+                    reader_process.stdout.close()
+                    reader_process.wait()
+
+            temp_output_path = output_video_path.with_name(f"{output_video_path.stem}_temp{output_video_path.suffix}")
 
             def frame_writer():
-                process = processor.get_ffmpeg_writer(
-                    input_video_path, output_video_path, output_width, output_height, output_fps
+                writer_process = processor.get_ffmpeg_writer(
+                    temp_output_path, output_width, output_height, output_fps
                 )
                 try:
                     while True:
                         batch = write_queue.get()
                         if batch is stop_signal:
                             break
-                        process.stdin.write(batch.tobytes())
-                        write_queue.task_done()
+                        
+                        if writer_process.poll() is not None:
+                            logger.error(f"FFmpeg writer exited prematurely with code {writer_process.returncode}")
+                            break
+                            
+                        for frame in batch:
+                            writer_process.stdin.write(frame.tobytes())
+                        writer_process.stdin.flush()
+                        
+                except BrokenPipeError:
+                    logger.warning("Broken pipe detected in writer thread.")
+                except Exception as e:
+                    logger.error(f"Writer thread error: {e}")
                 finally:
-                    process.stdin.close()
-                    process.wait()
+                    try:
+                        writer_process.stdin.close()
+                    except Exception:
+                        pass
+                    writer_process.wait()
 
             reader_thread = threading.Thread(target=frame_reader, daemon=True)
             writer_thread = threading.Thread(target=frame_writer, daemon=True)
@@ -379,7 +404,9 @@ class PipelineManager:
             reader_thread.start()
             writer_thread.start()
 
-            with tqdm(total=total_frames, desc="Processing Video", unit="fr", ncols=100) as pbar:
+            total_frames_display = total_frames if total_frames > 0 else None
+            
+            with tqdm(total=total_frames_display, desc="Processing Video", unit="fr", ncols=100) as pbar:
                 while True:
                     batch_array = read_queue.get()
                     if batch_array is stop_signal:
@@ -395,15 +422,23 @@ class PipelineManager:
                         final_batch = np.repeat(final_batch, 3, axis=-1)
 
                     write_queue.put(final_batch)
+                    
                     pbar.update(len(batch_array))
-
-                    del batch_array, processed_batch
+                    del batch_array
 
                     if progress_callback:
-                        progress_callback(pbar.n, total_frames)
+                        progress_callback(pbar.n, total_frames if total_frames > 0 else pbar.n)
 
             writer_thread.join()
-            cap.release()
+
+            if temp_output_path.exists():
+                try:
+                    processor.mux_audio(input_video_path, temp_output_path, output_video_path)
+                    temp_output_path.unlink()
+                except Exception as e:
+                    logger.error(f"Failed to mux audio. The silent video is saved at {temp_output_path}")
+                    raise
+
             logger.info("Video Pipeline completed successfully.")
 
         except Exception as e:

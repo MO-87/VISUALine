@@ -33,7 +33,7 @@ class TemporalColorPropNode(NodeBase):
         logger.info(f"Setting up {self.node_name} with RAFT EMA Blending...")
 
         self.last_smoothed_lab = None
-        self.last_gray_frame = None
+        self.last_luma_frame = None
         
         def color_loader(): return DDColorArchWrapper(
             model_filename=self.colorizer_model, render_res=self.render_res, fp16=self.fp16
@@ -58,6 +58,12 @@ class TemporalColorPropNode(NodeBase):
 
     def process(self, data: torch.Tensor) -> torch.Tensor:
         self.validate_input(data)
+        
+        original_shape = data.shape
+        if data.ndim == 5:
+            B, T_dim, C, H, W = data.shape
+            data = data.view(B * T_dim, C, H, W)
+            
         T, C, H, W = data.shape
         device = data.device
         
@@ -73,7 +79,7 @@ class TemporalColorPropNode(NodeBase):
             start_idx = 1
         else:
             prev_smoothed = self.last_smoothed_lab
-            prev_luma = self.last_luma_frame
+            prev_luma = self.last_luma_frame # FIXED variable name
             start_idx = 0
 
         xx = torch.arange(0, W, device=device).view(1, -1).repeat(H, 1)
@@ -129,10 +135,15 @@ class TemporalColorPropNode(NodeBase):
             prev_smoothed = blended_lab
             prev_luma = curr_luma
 
-        self.last_smoothed_lab = smoothed_lab_batch[-1:]
-        self.last_luma_frame = prev_luma 
+        self.last_smoothed_lab = smoothed_lab_batch[-1:].detach().clone()
+        self.last_luma_frame = prev_luma.detach().clone() 
 
-        return self._lab_to_rgb(smoothed_lab_batch)
+        final_rgb = self._lab_to_rgb(smoothed_lab_batch)
+        
+        if len(original_shape) == 5:
+            final_rgb = final_rgb.view(original_shape[0], original_shape[1], 3, H, W)
+            
+        return final_rgb
         
     def teardown(self) -> None:
         self.last_smoothed_lab = None

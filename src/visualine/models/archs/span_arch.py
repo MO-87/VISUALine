@@ -237,13 +237,3 @@ class SPAN(nn.Module):
         output = self.upsampler(out)
 
         return output
-
-if __name__ == "__main__":
-    from fvcore.nn import FlopCountAnalysis, flop_count_table
-    import time
-    model = SPAN(3, 3, upscale=4, feature_channels=48).cuda()
-    model.eval()
-    inputs = (torch.rand(1, 3, 256, 256).cuda(),)
-    print(flop_count_table(FlopCountAnalysis(model, inputs)))
-
-

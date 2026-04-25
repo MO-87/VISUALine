@@ -83,19 +83,24 @@ class RIFENode(NodeBase):
         if not self.is_setup or self.model is None:
             raise RuntimeError(f"{self.node_name} process called before successful setup.")
 
+        original_shape = data.shape
+        if data.ndim == 5:
+            B, T, C, H, W = data.shape
+            data = data.view(B * T, C, H, W)
+            
+        B, C, H, W = data.shape
         calc_dtype = torch.float16 if self.fp16 else torch.float32
         data_norm = data.to(dtype=calc_dtype, copy=True).mul_(1.0 / 255.0)
 
         if self.last_frame_buffer is None:
-            self.last_frame_buffer = data_norm.clone()
+            self.last_frame_buffer = data_norm[-1:].clone()
             return data.float() if self.fp16 else data
 
-        img0 = self.last_frame_buffer
+        img0 = torch.cat([self.last_frame_buffer, data_norm[:-1]], dim=0)
         img1 = data_norm
         
-        self.last_frame_buffer = data_norm.clone()
+        self.last_frame_buffer = data_norm[-1:].clone()
 
-        _, _, H, W = data.shape
         divisor = max(32, int(64.0 / self.scale))
         pad_h = (divisor - (H % divisor)) % divisor
         pad_w = (divisor - (W % divisor)) % divisor
@@ -115,11 +120,18 @@ class RIFENode(NodeBase):
         with autocast("cuda", enabled=self.fp16):
             interpolated_frame = self.model(x, timestep=0.5, scale_list=scale_list)[2][-1]
 
-        output_batch = torch.cat((interpolated_frame, img1), dim=0)
+        output_batch = torch.empty((B * 2, C, interpolated_frame.shape[2], interpolated_frame.shape[3]), 
+                                   dtype=interpolated_frame.dtype, device=data.device)
+        output_batch[0::2] = interpolated_frame
+        output_batch[1::2] = img1
 
         final_output = output_batch[..., :H, :W].mul_(255.0)
+        final_output = final_output.float() if self.fp16 else final_output
         
-        return final_output.float() if self.fp16 else final_output
+        if len(original_shape) == 5:
+            final_output = final_output.view(original_shape[0], original_shape[1] * 2, C, H, W)
+            
+        return final_output
 
     def teardown(self) -> None:
         logger.debug(f"Tearing down {self.node_name}...")

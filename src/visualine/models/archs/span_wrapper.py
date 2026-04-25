@@ -3,7 +3,6 @@ import torch
 from visualine.models.loader import get_model_path
 from visualine.models.base_wrapper import BaseModelWrapper
 
-# Import your patched SPAN architecture here
 from visualine.models.archs.span_arch import SPAN 
 
 logger = logging.getLogger(__name__)
@@ -70,13 +69,14 @@ class SPANArchWrapper(BaseModelWrapper):
 
     @torch.inference_mode()
     def predict(self, batch_tensor: torch.Tensor) -> torch.Tensor:
-        batch_tensor = batch_tensor.to(memory_format=torch.channels_last)
         batch_tensor = batch_tensor[:, [2, 1, 0], :, :] / 255.0
         
         if self.half:
             batch_tensor = batch_tensor.half()
         else:
             batch_tensor = batch_tensor.float()
+
+        batch_tensor = batch_tensor.to(memory_format=torch.channels_last)
 
         out = self.model(batch_tensor)
 

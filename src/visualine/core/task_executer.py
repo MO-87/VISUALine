@@ -24,6 +24,7 @@ class TaskExecuter:
         self._execution_plan = [node.process for node in nodes]
         logger.debug(f"Compiled plan with {len(self._execution_plan)} steps.")
 
+    @torch.inference_mode()
     def __call__(self, data_batch: torch.Tensor) -> torch.Tensor:
         try:
             for step in self._execution_plan:

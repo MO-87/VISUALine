@@ -113,15 +113,14 @@ class PipelineManager:
         
         if self.device in ["cuda", "mps"]:
             target_dtype = torch.float16
+            target_memory_format = torch.channels_last if self.device == "cuda" else torch.contiguous_format
         else:
             target_dtype = torch.float32  ## CPU requires float32 for most operations
+            target_memory_format = torch.contiguous_format
             
-        if self.device == "cuda":
-            tensor = tensor.to(self.device, non_blocking=True)
-        else:
-            tensor = tensor.to(self.device)
+        tensor = tensor.to(self.device)
             
-        return tensor.to(dtype=target_dtype, memory_format=torch.contiguous_format)
+        return tensor.to(dtype=target_dtype, memory_format=target_memory_format)
 
     def _ensure_numpy_output(self, data: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
         if isinstance(data, torch.Tensor):
@@ -148,8 +147,10 @@ class PipelineManager:
                 if batch_len > 1:
                     logger.warning(f"Memory OOM. Splitting batch of {batch_len} in half and retrying...")
                     mid = batch_len // 2
-                    part1 = self._safe_execute_batch(batch_array[:mid])
-                    part2 = self._safe_execute_batch(batch_array[mid:])
+
+                    ## MOVE TO CPU IMMEDIATELY to free VRAM before concatenating!!
+                    part1 = self._safe_execute_batch(batch_array[:mid]).cpu()
+                    part2 = self._safe_execute_batch(batch_array[mid:]).cpu()
                     
                     return torch.cat([part1, part2])
                 else:
@@ -296,8 +297,8 @@ class PipelineManager:
             del sample_array, processed_sample
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-            read_queue = queue.Queue(maxsize=2)
-            write_queue = queue.Queue(maxsize=2)
+            read_queue = queue.Queue(maxsize=16) 
+            write_queue = queue.Queue(maxsize=16)
             stop_signal = object()
 
             def frame_reader():

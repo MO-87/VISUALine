@@ -32,11 +32,12 @@ class VideoProcessor:
         output_video_path.parent.mkdir(parents=True, exist_ok=True)
         
         nvenc_available = False
-        try:
-            res = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True)
-            nvenc_available = "h264_nvenc" in res.stdout
-        except Exception:
-            pass
+        if width <= 4096 and height <= 4096:
+            try:
+                res = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True)
+                nvenc_available = "h264_nvenc" in res.stdout
+            except Exception:
+                pass
 
         encoder = ["-c:v", "h264_nvenc", "-preset", "p4"] if nvenc_available else ["-c:v", "libx264", "-preset", "fast"]
 

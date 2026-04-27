@@ -32,38 +32,23 @@ class DynamicUpscaleNode(NodeBase):
         self.batch_size: int = self.config.get("batch_size", 32)
         self.fp16: bool = self.config.get("fp16", True)
         self.debug_view: bool = self.config.get("debug_view", False)
-        self.dilation: int = self.config.get("dilation", 1)
-        self.edge_weight: float = self.config.get("edge_weight", 2.0)
-        self.persistence: int = self.config.get("persistence", 2)
-        self.global_threshold: float = self.config.get("global_threshold", 0.0001)
         
         # SPAN specific
         self.feature_channels: int = self.config.get("feature_channels", 48)
 
         # State for temporal logic
         self.prev_input: torch.Tensor | None = None
-        self.prev_input_gray: torch.Tensor | None = None
         self.prev_output: torch.Tensor | None = None
-        self.active_counters: torch.Tensor | None = None
         self.frame_count: int = 0
         
         # Internals
         self.model_wrapper: Union[RealESRGANArchWrapper, SPANArchWrapper, None] = None
         self._resource_manager: ResourceManager = ResourceManager()
         self.block_size = self.tile_size + 2 * self.padding
-        self.sobel_x = None
-        self.sobel_y = None
 
     def setup(self, device: torch.device) -> None:
         if self.is_setup:
             return
-        
-        # Initialize Sobel kernels for edge detection
-        self.sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32, device=device).view(1, 1, 3, 3)
-        self.sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32, device=device).view(1, 1, 3, 3)
-        if self.fp16:
-            self.sobel_x = self.sobel_x.half()
-            self.sobel_y = self.sobel_y.half()
         
         # Auto-detect model type if not explicitly provided
         if "span" in self.model_filename.lower() and self.model_type == "realesrgan":
@@ -118,57 +103,20 @@ class DynamicUpscaleNode(NodeBase):
             curr_tensor = batch_bgr[i:i+1] / 255.0
             _, _, h, w = curr_tensor.shape
             
-            # Convert to grayscale for efficient difference and edge detection
-            curr_gray = 0.299 * curr_tensor[:, 0:1] + 0.587 * curr_tensor[:, 1:2] + 0.114 * curr_tensor[:, 2:3]
-            
             is_refresh = (self.frame_count % self.refresh_interval == 0) or (self.prev_input is None)
             rows, cols = math.ceil(h / self.tile_size), math.ceil(w / self.tile_size)
             
-            # Initialize persistence counters
-            if self.active_counters is None or self.active_counters.shape != (rows, cols):
-                self.active_counters = torch.zeros((rows, cols), dtype=torch.int32, device=device)
-
             if is_refresh:
                 mask = torch.ones((rows, cols), dtype=torch.bool, device=device)
-                self.active_counters.fill_(self.persistence)
             else:
-                # 1. Global Skip (Fast Reject)
-                global_diff = torch.mean(torch.abs(curr_gray - self.prev_input_gray))
-                if global_diff < self.global_threshold:
-                    processed_frames.append(self.prev_output)
-                    self.frame_count += 1
-                    continue
-
-                # 2. Luma-only difference and L1 Edge Detection
-                diff = torch.abs(curr_gray - self.prev_input_gray)
-                grad_x = F.conv2d(curr_gray, self.sobel_x, padding=1)
-                grad_y = F.conv2d(curr_gray, self.sobel_y, padding=1)
-                edge_mag = torch.abs(grad_x) + torch.abs(grad_y) # L1 is faster than sqrt
+                # Basic motion mask
+                diff = torch.abs(curr_tensor - self.prev_input).mean(dim=1, keepdim=True)
+                block_max = F.max_pool2d(diff, self.tile_size, self.tile_size, ceil_mode=True)
+                mask = (block_max > self.threshold).squeeze()
                 
-                # Weight the difference
-                weighted_diff = diff * (1.0 + self.edge_weight * edge_mag)
-                
-                # 3. Block-level max pooling
-                block_max = F.max_pool2d(weighted_diff, self.tile_size, self.tile_size, ceil_mode=True)
-                current_mask = (block_max > self.threshold).squeeze()
-                
-                # Reshape if necessary
-                if current_mask.ndim == 0: current_mask = current_mask.unsqueeze(0).unsqueeze(0)
-                elif current_mask.ndim == 1: current_mask = current_mask.view(rows, cols)
-
-                # 4. Update Persistence Counters
-                self.active_counters[current_mask] = self.persistence
-                mask = (self.active_counters > 0)
-                # Decay counters
-                self.active_counters = (self.active_counters - 1).clamp(min=0)
-
-                # 5. Optional Mask Dilation (applied to the persistent mask)
-                if self.dilation > 0:
-                    mask_float = mask.float().unsqueeze(0).unsqueeze(0)
-                    dilated_mask = F.max_pool2d(mask_float, kernel_size=2*self.dilation + 1, stride=1, padding=self.dilation)
-                    mask = (dilated_mask > 0).squeeze()
-                    if mask.ndim == 0: mask = mask.unsqueeze(0).unsqueeze(0)
-                    elif mask.ndim == 1: mask = mask.view(rows, cols)
+                # Reshape mask to 2D
+                if mask.ndim == 0: mask = mask.unsqueeze(0).unsqueeze(0)
+                elif mask.ndim == 1: mask = mask.view(rows, cols)
 
             active_mask = mask.flatten()
             num_active = active_mask.sum().item()
@@ -202,8 +150,10 @@ class DynamicUpscaleNode(NodeBase):
                     out_tiles_list.append(model(active_tiles[j : j + self.batch_size]))
                 
                 out_tiles_all = torch.cat(out_tiles_list, dim=0)
+                # Crop model output padding
                 s_p, e_p = self.padding * self.scale, (self.padding + self.tile_size) * self.scale
-                out_tiles_final = out_tiles_all[:, :, s_p:e_p, s_p:e_p]
+                # Bug fix: cast TRT output to buffer dtype
+                out_tiles_final = out_tiles_all[:, :, s_p:e_p, s_p:e_p].to(dtype)
                 
                 # Stitching
                 out_ts = self.tile_size * self.scale
@@ -217,27 +167,22 @@ class DynamicUpscaleNode(NodeBase):
             
             # STATE PERSISTENCE
             self.prev_input = curr_tensor.clone()
-            self.prev_input_gray = curr_gray.clone()
             self.prev_output = curr_output_final.clone()
             self.frame_count += 1
 
-            # DEBUG VIEW: Draw borders only on the current frame output
+            # DEBUG VIEW
             if self.debug_view and num_active > 0:
-                # Reuse the reshaped view to draw borders efficiently
-                # We use out_tiles_final and re-stitch to avoid complex slice logic
                 out_tiles_final[:, :, 0, :] = 1.0
                 out_tiles_final[:, :, -1, :] = 1.0
                 out_tiles_final[:, :, :, 0] = 1.0
                 out_tiles_final[:, :, :, -1] = 1.0
-                
                 curr_output_reshaped = curr_output.view(1, 3, rows, out_ts, cols, out_ts)
                 curr_output_reshaped = curr_output_reshaped.permute(0, 2, 4, 1, 3, 5).reshape(-1, 3, out_ts, out_ts)
                 curr_output_reshaped[active_mask] = out_tiles_final
-                
-                # Refresh curr_output_final view
                 curr_output_final = curr_output[:, :, :out_h, :out_w]
 
             processed_frames.append(curr_output_final)
+
         # Back to RGB uint8
         final_batch_bgr = torch.cat(processed_frames, dim=0)
         final_batch_rgb = final_batch_bgr[:, [2, 1, 0], :, :]

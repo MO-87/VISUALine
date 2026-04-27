@@ -142,12 +142,13 @@ class Conv3XC(nn.Module):
 
         self.eval_conv.weight.data = self.weight_concat
         self.eval_conv.bias.data = self.bias_concat
+        self.update_params_flag = True
 
 
     def forward(self, x):
         if self.training:
             pad = 1
-            x_pad = F.pad(x, (pad, pad, pad, pad), "constant", 0)
+            x_pad = F.pad(x, (pad, pad, pad, pad), "constant", 0.0)
             out = self.conv(x_pad) + self.sk(x)
         else:
             if not self.update_params_flag:
@@ -227,8 +228,8 @@ class SPAN(nn.Module):
         self.upsampler = pixelshuffle_block(feature_channels, out_channels, upscale_factor=upscale)
 
     def forward(self, x):
-        self.mean = self.mean.type_as(x)
-        x = (x - self.mean) * self.img_range
+        mean = self.mean.type_as(x)
+        x = (x - mean) * self.img_range
 
         out_feature = self.conv_1(x)
 

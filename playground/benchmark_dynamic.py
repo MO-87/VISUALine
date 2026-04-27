@@ -147,6 +147,25 @@ def main():
                 "persistence": 2,
                 "global_threshold": 0.0002
             }
+        },
+        {
+            "name": "Dynamic_T0.03_TRT_Optimized",
+            "class": DynamicUpscaleNode,
+            "params": {
+                "model_filename": "spanx4_ch48_trt.ts",
+                "model_type": "span",
+                "scale": 4,
+                "threshold": 0.03,
+                "tile_size": 64,
+                "padding": 16,
+                "refresh_interval": 60,
+                "fp16": True,
+                "batch_size": 1, # TRT model was exported with batch 1
+                "edge_weight": 2.5,
+                "dilation": 1,
+                "persistence": 3,
+                "global_threshold": 0.0001
+            }
         }
     ]
     

@@ -1,5 +1,10 @@
 import logging
 import torch
+try:
+    import torch_tensorrt
+except ImportError:
+    pass
+
 from visualine.models.loader import get_model_path
 from visualine.models.base_wrapper import BaseModelWrapper
 
@@ -27,38 +32,45 @@ class SPANArchWrapper(BaseModelWrapper):
             if "cuda" in target_device_str:
                 torch.backends.cudnn.benchmark = True
 
-            logger.info(f"Booting SPAN engine (Scale: {self.scale}x)...")
-            
-            self.model = SPAN(
-                num_in_ch=3, 
-                num_out_ch=3, 
-                feature_channels=self.feature_channels, 
-                upscale=self.scale
-            )
-            
             model_path_str = str(get_model_path(self.model_filename))
-            state_dict = torch.load(model_path_str, map_location='cpu')
-            
-            if 'params_ema' in state_dict:
-                state_dict = state_dict['params_ema']
-            elif 'params' in state_dict:
-                state_dict = state_dict['params']
+
+            if self.model_filename.endswith(".ts"):
+                logger.info(f"Loading optimized Torch-TensorRT model: {self.model_filename}...")
+                self.model = torch.jit.load(model_path_str).to(device)
+            else:
+                logger.info(f"Booting SPAN engine (Scale: {self.scale}x)...")
                 
-            self.model.load_state_dict(state_dict, strict=True)
-            
-            self.model.eval()
-            self.model = self.model.to(device, memory_format=torch.channels_last)
-            
-            if self.half:
-                self.model = self.model.half()
+                self.model = SPAN(
+                    num_in_ch=3, 
+                    num_out_ch=3, 
+                    feature_channels=self.feature_channels, 
+                    upscale=self.scale
+                )
+                
+                state_dict = torch.load(model_path_str, map_location='cpu')
+                
+                if 'params_ema' in state_dict:
+                    state_dict = state_dict['params_ema']
+                elif 'params' in state_dict:
+                    state_dict = state_dict['params']
+                    
+                self.model.load_state_dict(state_dict, strict=True)
+                
+                self.model.eval()
+                self.model = self.model.to(device, memory_format=torch.channels_last)
+                
+                if self.half:
+                    self.model = self.model.half()
 
-            for param in self.model.parameters():
-                param.requires_grad = False
+                for param in self.model.parameters():
+                    param.requires_grad = False
 
-            logger.debug("Running dummy forward pass to fuse SPAN kernels...")
+            logger.debug("Running dummy forward pass to fuse kernels...")
             with torch.inference_mode():
-                dummy_input = torch.zeros(1, 3, 64, 64, device=device, dtype=torch.float16 if self.half else torch.float32)
-                dummy_input = dummy_input.to(memory_format=torch.channels_last)
+                # Note: TRT engine has specific input shape. 
+                # We compiled it with 1,3,96,96 to match tile_size=64 + 2*padding=16
+                test_shape = (1, 3, 96, 96) if self.model_filename.endswith(".ts") else (1, 3, 64, 64)
+                dummy_input = torch.zeros(test_shape, device=device, dtype=torch.float16 if self.half else torch.float32)
                 _ = self.model(dummy_input)
 
             logger.info(f"SPAN Model loaded on {self._device_str}. FP16: {self.half}")
@@ -67,7 +79,12 @@ class SPANArchWrapper(BaseModelWrapper):
 
     @torch.inference_mode()
     def predict(self, batch_tensor: torch.Tensor) -> torch.Tensor:
-        batch_tensor = batch_tensor.to(memory_format=torch.channels_last)
+        # TRT compiled with contiguous might need contiguous
+        if self.model_filename.endswith(".ts"):
+            batch_tensor = batch_tensor.to(memory_format=torch.contiguous_format)
+        else:
+            batch_tensor = batch_tensor.to(memory_format=torch.channels_last)
+
         batch_tensor = batch_tensor[:, [2, 1, 0], :, :] / 255.0
         
         if self.half:

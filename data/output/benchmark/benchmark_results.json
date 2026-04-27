@@ -2,145 +2,97 @@
     {
         "video": "caltech_ml_lec.mp4",
         "tag": "Baseline_SPAN",
-        "duration": 287.06018805503845,
-        "avg_fps": 6.256527636830121,
-        "total_frames": 1796,
+        "duration": 14.003123044967651,
+        "avg_fps": 7.1412641079332175,
+        "total_frames": 100,
         "output_path": "data/output/benchmark/caltech_ml_lec_Baseline_SPAN.mp4"
     },
     {
         "video": "caltech_ml_lec.mp4",
-        "tag": "Dynamic_Threshold_0.02_EdgeAware",
-        "duration": 372.1196701526642,
-        "avg_fps": 4.82640436412077,
-        "total_frames": 1796,
-        "output_path": "data/output/benchmark/caltech_ml_lec_Dynamic_Threshold_0.02_EdgeAware.mp4"
-    },
-    {
-        "video": "caltech_ml_lec.mp4",
-        "tag": "Dynamic_Threshold_0.01_EdgeAware",
-        "duration": 383.36757040023804,
-        "avg_fps": 4.684798972758612,
-        "total_frames": 1796,
-        "output_path": "data/output/benchmark/caltech_ml_lec_Dynamic_Threshold_0.01_EdgeAware.mp4"
-    },
-    {
-        "video": "high_motion_nature.mp4",
-        "tag": "Baseline_SPAN",
-        "duration": 999.7051482200623,
-        "avg_fps": 1.4264205826477334,
-        "total_frames": 1426,
-        "output_path": "data/output/benchmark/high_motion_nature_Baseline_SPAN.mp4"
-    },
-    {
-        "video": "high_motion_nature.mp4",
-        "tag": "Dynamic_Threshold_0.02_EdgeAware",
-        "duration": 1172.8537945747375,
-        "avg_fps": 1.2158378193396648,
-        "total_frames": 1426,
-        "output_path": "data/output/benchmark/high_motion_nature_Dynamic_Threshold_0.02_EdgeAware.mp4"
-    },
-    {
-        "video": "high_motion_nature.mp4",
-        "tag": "Dynamic_Threshold_0.01_EdgeAware",
-        "duration": 1266.5333268642426,
-        "avg_fps": 1.1259079960655867,
-        "total_frames": 1426,
-        "output_path": "data/output/benchmark/high_motion_nature_Dynamic_Threshold_0.01_EdgeAware.mp4"
-    },
-    {
-        "video": "mit_math_strang.mp4",
-        "tag": "Baseline_SPAN",
-        "duration": 270.26983404159546,
-        "avg_fps": 6.349210247918019,
-        "total_frames": 1716,
-        "output_path": "data/output/benchmark/mit_math_strang_Baseline_SPAN.mp4"
-    },
-    {
-        "video": "mit_math_strang.mp4",
-        "tag": "Dynamic_Threshold_0.02_EdgeAware",
-        "duration": 374.0048062801361,
-        "avg_fps": 4.588176331388335,
-        "total_frames": 1716,
-        "output_path": "data/output/benchmark/mit_math_strang_Dynamic_Threshold_0.02_EdgeAware.mp4"
-    },
-    {
-        "video": "mit_math_strang.mp4",
-        "tag": "Dynamic_Threshold_0.01_EdgeAware",
-        "duration": 378.0291450023651,
-        "avg_fps": 4.539332542704515,
-        "total_frames": 1716,
-        "output_path": "data/output/benchmark/mit_math_strang_Dynamic_Threshold_0.01_EdgeAware.mp4"
-    },
-    {
-        "video": "caltech_ml_lec.mp4",
-        "tag": "Dynamic_T0.02_EdgeAware",
-        "duration": 22.874976634979248,
-        "avg_fps": 4.371589164689467,
-        "total_frames": 100,
-        "output_path": "data/output/benchmark/caltech_ml_lec_Dynamic_T0.02_EdgeAware.mp4"
-    },
-    {
-        "video": "caltech_ml_lec.mp4",
         "tag": "Dynamic_T0.03_Optimized",
-        "duration": 22.767869234085083,
-        "avg_fps": 4.392154530222488,
+        "duration": 20.640417337417603,
+        "avg_fps": 4.844863277968553,
         "total_frames": 100,
         "output_path": "data/output/benchmark/caltech_ml_lec_Dynamic_T0.03_Optimized.mp4"
     },
     {
-        "video": "high_motion_nature.mp4",
-        "tag": "Dynamic_T0.02_EdgeAware",
-        "duration": 85.09381365776062,
-        "avg_fps": 1.175173560820657,
+        "video": "caltech_ml_lec.mp4",
+        "tag": "Dynamic_T0.05_Aggressive",
+        "duration": 19.772119522094727,
+        "avg_fps": 5.057626719697558,
         "total_frames": 100,
-        "output_path": "data/output/benchmark/high_motion_nature_Dynamic_T0.02_EdgeAware.mp4"
+        "output_path": "data/output/benchmark/caltech_ml_lec_Dynamic_T0.05_Aggressive.mp4"
+    },
+    {
+        "video": "caltech_ml_lec.mp4",
+        "tag": "Dynamic_T0.03_TRT_Optimized",
+        "duration": 16.306239128112793,
+        "avg_fps": 6.132621950060506,
+        "total_frames": 100,
+        "output_path": "data/output/benchmark/caltech_ml_lec_Dynamic_T0.03_TRT_Optimized.mp4"
+    },
+    {
+        "video": "high_motion_nature.mp4",
+        "tag": "Baseline_SPAN",
+        "duration": 60.88443326950073,
+        "avg_fps": 1.6424559551594562,
+        "total_frames": 100,
+        "output_path": "data/output/benchmark/high_motion_nature_Baseline_SPAN.mp4"
     },
     {
         "video": "high_motion_nature.mp4",
         "tag": "Dynamic_T0.03_Optimized",
-        "duration": 79.6351170539856,
-        "avg_fps": 1.2557274190004493,
+        "duration": 74.36775016784668,
+        "avg_fps": 1.3446688890587895,
         "total_frames": 100,
         "output_path": "data/output/benchmark/high_motion_nature_Dynamic_T0.03_Optimized.mp4"
     },
     {
-        "video": "mit_math_strang.mp4",
-        "tag": "Dynamic_T0.02_EdgeAware",
-        "duration": 21.55659794807434,
-        "avg_fps": 4.6389509254141394,
+        "video": "high_motion_nature.mp4",
+        "tag": "Dynamic_T0.05_Aggressive",
+        "duration": 69.69993567466736,
+        "avg_fps": 1.4347215536433455,
         "total_frames": 100,
-        "output_path": "data/output/benchmark/mit_math_strang_Dynamic_T0.02_EdgeAware.mp4"
+        "output_path": "data/output/benchmark/high_motion_nature_Dynamic_T0.05_Aggressive.mp4"
+    },
+    {
+        "video": "high_motion_nature.mp4",
+        "tag": "Dynamic_T0.03_TRT_Optimized",
+        "duration": 63.812413930892944,
+        "avg_fps": 1.567093200835455,
+        "total_frames": 100,
+        "output_path": "data/output/benchmark/high_motion_nature_Dynamic_T0.03_TRT_Optimized.mp4"
+    },
+    {
+        "video": "mit_math_strang.mp4",
+        "tag": "Baseline_SPAN",
+        "duration": 14.443353652954102,
+        "avg_fps": 6.9235997679491135,
+        "total_frames": 100,
+        "output_path": "data/output/benchmark/mit_math_strang_Baseline_SPAN.mp4"
     },
     {
         "video": "mit_math_strang.mp4",
         "tag": "Dynamic_T0.03_Optimized",
-        "duration": 21.673038721084595,
-        "avg_fps": 4.614027653755589,
+        "duration": 19.388006448745728,
+        "avg_fps": 5.15782786973796,
         "total_frames": 100,
         "output_path": "data/output/benchmark/mit_math_strang_Dynamic_T0.03_Optimized.mp4"
     },
     {
-        "video": "caltech_ml_lec.mp4",
+        "video": "mit_math_strang.mp4",
         "tag": "Dynamic_T0.05_Aggressive",
-        "duration": 352.8448646068573,
-        "avg_fps": 5.090055659449992,
-        "total_frames": 1796,
-        "output_path": "data/output/benchmark/caltech_ml_lec_Dynamic_T0.05_Aggressive.mp4"
-    },
-    {
-        "video": "high_motion_nature.mp4",
-        "tag": "Dynamic_T0.05_Aggressive",
-        "duration": 1073.2423300743103,
-        "avg_fps": 1.3286840819083843,
-        "total_frames": 1426,
-        "output_path": "data/output/benchmark/high_motion_nature_Dynamic_T0.05_Aggressive.mp4"
+        "duration": 18.681410312652588,
+        "avg_fps": 5.352914920575979,
+        "total_frames": 100,
+        "output_path": "data/output/benchmark/mit_math_strang_Dynamic_T0.05_Aggressive.mp4"
     },
     {
         "video": "mit_math_strang.mp4",
-        "tag": "Dynamic_T0.05_Aggressive",
-        "duration": 374.67142152786255,
-        "avg_fps": 4.580013049840764,
-        "total_frames": 1716,
-        "output_path": "data/output/benchmark/mit_math_strang_Dynamic_T0.05_Aggressive.mp4"
+        "tag": "Dynamic_T0.03_TRT_Optimized",
+        "duration": 16.404866695404053,
+        "avg_fps": 6.095752062893371,
+        "total_frames": 100,
+        "output_path": "data/output/benchmark/mit_math_strang_Dynamic_T0.03_TRT_Optimized.mp4"
     }
 ]

@@ -1,0 +1,110 @@
+pipeline_name: "04_Smart_Vertical_Reframe"
+
+ui:
+  display_name: "Smart Vertical Reframe"
+  category: "Social Media"
+  description: "Convert videos into vertical format while following the prompted subject."
+  input_types: ["video", "gif"]
+  speed: "medium"
+  supports_prompt: true
+  is_hq: false
+  tags: ["reframe", "vertical", "social", "shorts", "prompt"]
+
+  controls:
+    - key: "prompt"
+      label: "Subject prompt"
+      type: "text"
+      default: "person"
+      description: "Describe the subject to follow, e.g. person, dog, car, man with glasses."
+      node: 0
+      param: "prompt"
+
+    - key: "smoothing"
+      label: "Camera smoothing"
+      type: "slider"
+      min: 0
+      max: 0.98
+      step: 0.01
+      default: 0.88
+      description: "Higher values make the virtual camera movement smoother."
+      node: 1
+      param: "smoothing"
+
+    - key: "box_expansion"
+      label: "Subject framing"
+      type: "slider"
+      min: 0
+      max: 1.0
+      step: 0.05
+      default: 0.35
+      description: "Expands the detected subject area before reframing."
+      node: 1
+      param: "box_expansion"
+
+    - key: "conf"
+      label: "Detection confidence"
+      type: "slider"
+      min: 0.1
+      max: 0.8
+      step: 0.05
+      default: 0.30
+      advanced: true
+      node: 0
+      param: "conf"
+
+    - key: "detect_every_n_frames"
+      label: "Detection frequency"
+      type: "select"
+      default: 5
+      options: [1, 3, 5, 10]
+      description: "Lower is more accurate but slower. Higher is faster."
+      advanced: true
+      node: 0
+      param: "detect_every_n_frames"
+
+    - key: "output_width"
+      label: "Output width"
+      type: "number"
+      default: 720
+      advanced: true
+      node: 1
+      param: "output_width"
+
+    - key: "output_height"
+      label: "Output height"
+      type: "number"
+      default: 1280
+      advanced: true
+      node: 1
+      param: "output_height"
+
+pipeline:
+  - class: "segmentation.prompt_box_detection_node.PromptBoxDetectionNode"
+    params:
+      model_filename: "groundingdino_swinb_cogcoor.pth"
+      config_path: "configs/model_configs/GroundingDINO_SwinB_cfg.py"
+
+      prompt: "person"
+      conf: 0.30
+
+      detect_every_n_frames: 5
+      reuse_last_boxes: true
+      max_missing_frames: 25
+
+      box_format: "xyxy_abs"
+      min_box_area_ratio: 0.0002
+      max_box_area_ratio: 0.65
+      max_boxes: 1
+
+  - class: "utils.smart_reframe_node.SmartReframeNode"
+    params:
+      output_width: 720
+      output_height: 1280
+      smoothing: 0.88
+      box_expansion: 0.35
+
+      box_format: "xyxy_abs"
+      min_box_area_ratio: 0.0002
+      max_box_area_ratio: 0.65
+      max_boxes: 1
+      fallback: "keep_last"

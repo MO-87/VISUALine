@@ -1,173 +1,370 @@
-<script setup>
-import { ref, onMounted } from 'vue'
-import axios from 'axios'
-
-// --- State Variables ---
-const systemHealth = ref(null)
-const serverStatus = ref('Connecting...')
-const currentJob = ref({
-  id: null,
-  status: 'Idle',
-  progress: 0,
-  message: ''
-})
-
-// --- API Functions ---
-const API_BASE = 'http://127.0.0.1:8000/api/v1'
-const WS_BASE = 'ws://127.0.0.1:8000/ws'
-
-// 1. Fetch System Health (Hardware Info)
-const checkSystemHealth = async () => {
-  try {
-    const response = await axios.get(`${API_BASE}/system/health`)
-    systemHealth.value = response.data.hardware
-    serverStatus.value = 'Online 🟢'
-  } catch (error) {
-    serverStatus.value = 'Offline 🔴 (Is the Python server running?)'
-    console.error(error)
-  }
-}
-
-// 2. Start a Test Job
-const startTestJob = async () => {
-  try {
-    currentJob.value.status = 'Starting...'
-    
-    // NOTE: For this test, make sure these paths actually exist on your machine!
-    // Or, change them to paths of a real short video and real config you have.
-    const requestData = {
-      input_path: "D:/Graduation Project/VISUALine/data/input/sample 2.mp4", 
-      output_path: "D:/Graduation Project/VISUALine/data/output/test_output.mp4",
-      pipeline_config_path: "D:/Graduation Project/VISUALine/configs/pipeline_configs/test_grayscale.yaml"
-    }
-
-    const response = await axios.post(`${API_BASE}/video/process`, requestData)
-    const jobId = response.data.job_id
-    currentJob.value.id = jobId
-    
-    // As soon as we get the ID, connect to the WebSocket!
-    connectToWebSocket(jobId)
-
-  } catch (error) {
-    currentJob.value.status = 'Failed to start job'
-    console.error(error)
-  }
-}
-
-// 3. Listen to Real-Time Progress via WebSockets
-const connectToWebSocket = (jobId) => {
-  const socket = new WebSocket(`${WS_BASE}/progress/${jobId}`)
-
-  socket.onopen = () => {
-    currentJob.value.status = 'Processing (WebSocket Connected)'
-  }
-
-  socket.onmessage = (event) => {
-    const data = JSON.parse(event.data)
-    
-    // Update the UI in real-time
-    currentJob.value.progress = data.progress
-    currentJob.value.status = data.status
-    currentJob.value.message = `Frame ${data.current_frame || 0} of ${data.total_frames || 0}`
-    
-    if (data.status === 'completed' || data.status === 'failed') {
-      socket.close()
-    }
-  }
-
-  socket.onerror = (error) => {
-    console.error("WebSocket Error:", error)
-  }
-}
-
-// Fetch health immediately when the app loads
-onMounted(() => {
-  checkSystemHealth()
-})
-</script>
-
 <template>
-  <div class="dashboard">
-    <h1>VISUALine AI Suite</h1>
-    
-    <div class="card">
-      <h2>Server Status: {{ serverStatus }}</h2>
-      <div v-if="systemHealth">
-        <p><strong>Device:</strong> {{ systemHealth.device_name || systemHealth.device.toUpperCase() }}</p>
-        <p><strong>VRAM Limit:</strong> {{ systemHealth.vram_limit_gb?.toFixed(2) }} GB</p>
-        <p><strong>VRAM Used:</strong> {{ systemHealth.vram_used_gb?.toFixed(2) }} GB</p>
-      </div>
-      <button @click="checkSystemHealth">Refresh Hardware Stats</button>
-    </div>
+  <AppShell
+    :active-section="activeSection"
+    :categories="categories"
+    :system-health="systemHealth"
+    :backend-online="backendOnline"
+    :active-jobs-count="activeJobsCount"
+    :selected-workflow="selectedWorkflowDetail"
+    :media-path="mediaPath"
+    @select-section="handleSectionSelect"
+    @select-category="activeCategory = $event"
+    @refresh-system="loadSystemHealth"
+    @open-workflow-picker="openWorkflowPicker"
+    @select-file="selectMediaFile"
+  >
+    <MainWorkspace
+      :selected-workflow-detail="selectedWorkflowDetail"
+      :media-path="mediaPath"
+      :selected-media-kind="selectedMediaKind"
+      :original-preview-url="originalPreviewUrl"
+      :output-url="outputUrl"
+      :control-values="controlValues"
+      :current-job="currentJob"
+      :is-processing="isProcessing"
+      :job-progress="jobProgress"
+      :can-run="canRun"
+      @select-file="selectMediaFile"
+      @update:media-path="mediaPath = $event"
+      @update:mediaPath="mediaPath = $event"
+      @update-control="updateControl"
+      @run="runWorkflow"
+      @open-workflow-picker="openWorkflowPicker"
+    />
 
-    <div class="card">
-      <h2>Pipeline Tester</h2>
-      <button @click="startTestJob" :disabled="currentJob.status.includes('Processing')">
-        Run Test Video Pipeline
-      </button>
-
-      <div v-if="currentJob.id" class="progress-section">
-        <p><strong>Job ID:</strong> {{ currentJob.id }}</p>
-        <p><strong>Status:</strong> {{ currentJob.status.toUpperCase() }}</p>
-        <p><strong>Details:</strong> {{ currentJob.message }}</p>
-        
-        <div class="progress-bar-bg">
-          <div class="progress-bar-fill" :style="{ width: currentJob.progress + '%' }"></div>
-        </div>
-        <p>{{ currentJob.progress.toFixed(1) }}%</p>
-      </div>
-    </div>
-  </div>
+    <WorkflowPickerDrawer
+      :open="workflowPickerOpen"
+      :workflows="pipelines"
+      :selected-workflow-id="selectedPipelineId"
+      :loading="loadingPipelines"
+      @close="workflowPickerOpen = false"
+      @select="selectWorkflow"
+    />
+  </AppShell>
 </template>
 
-<style>
-/* Brutally simple styling for the proof-of-concept */
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background-color: #1e1e1e;
-  color: #ffffff;
-  padding: 20px;
+<script setup>
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+
+import AppShell from './components/layout/AppShell.vue'
+import MainWorkspace from './components/workspace/MainWorkspace.vue'
+import WorkflowPickerDrawer from './components/workflows/WorkflowPickerDrawer.vue'
+
+import { listPipelines, getPipelineDetail } from './api/pipelineApi'
+import { getSystemHealth } from './api/systemApi'
+import { processVideo } from './api/videoApi'
+import { processImage } from './api/imageApi'
+import { createJobProgressSocket, getJobOutputUrl } from './api/jobsApi'
+
+const activeSection = ref('workflows')
+const activeCategory = ref(null)
+const workflowPickerOpen = ref(false)
+
+const pipelines = ref([])
+const selectedPipelineId = ref(null)
+const selectedWorkflowDetail = ref(null)
+
+const loadingPipelines = ref(false)
+const systemHealth = ref(null)
+const backendOnline = ref(false)
+
+const mediaPath = ref('')
+const controlValues = ref({})
+
+const currentJob = ref(null)
+const currentSocket = ref(null)
+const outputUrl = ref('')
+
+let healthInterval = null
+
+const selectedMediaKind = computed(() => {
+  const lower = mediaPath.value.toLowerCase()
+
+  const imageExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff']
+
+  if (imageExtensions.some((extension) => lower.endsWith(extension))) {
+    return 'image'
+  }
+
+  return 'video'
+})
+
+const categories = computed(() => {
+  const values = pipelines.value
+    .map((pipeline) => pipeline.category)
+    .filter(Boolean)
+
+  return [...new Set(values)]
+})
+
+const activeJobsCount = computed(() => {
+  return (
+    systemHealth.value?.active_jobs_count ??
+    systemHealth.value?.jobs?.active_jobs_count ??
+    0
+  )
+})
+
+const isProcessing = computed(() => {
+  const status = String(currentJob.value?.status || '').toLowerCase()
+  return ['queued', 'pending', 'processing'].includes(status)
+})
+
+const jobProgress = computed(() => {
+  const value = Number(currentJob.value?.progress || 0)
+
+  if (Number.isNaN(value)) return 0
+
+  return Math.min(100, Math.max(0, value))
+})
+
+const canRun = computed(() => {
+  return Boolean(
+    selectedWorkflowDetail.value &&
+    selectedPipelineId.value &&
+    mediaPath.value &&
+    !isProcessing.value
+  )
+})
+
+const originalPreviewUrl = computed(() => {
+  if (!mediaPath.value) return ''
+
+  if (window.visualine?.createMediaUrl) {
+    return window.visualine.createMediaUrl(mediaPath.value)
+  }
+
+  if (mediaPath.value.startsWith('file://')) {
+    return mediaPath.value
+  }
+
+  const normalizedPath = mediaPath.value.replace(/\\/g, '/')
+  return encodeURI(`file://${normalizedPath}`)
+})
+
+watch(mediaPath, () => {
+  outputUrl.value = ''
+
+  if (!isProcessing.value) {
+    currentJob.value = null
+  }
+})
+
+function handleSectionSelect(section) {
+  activeSection.value = section
+
+  if (section === 'workflows') {
+    openWorkflowPicker()
+  }
 }
-.dashboard {
-  max-width: 600px;
-  margin: 0 auto;
+
+function openWorkflowPicker() {
+  workflowPickerOpen.value = true
 }
-.card {
-  background-color: #2d2d2d;
-  padding: 20px;
-  border-radius: 8px;
-  margin-bottom: 20px;
-  border: 1px solid #404040;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
-button {
-  background-color: #4CAF50;
-  color: white;
-  padding: 10px 15px;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: bold;
+
+async function waitForBackendFromRenderer(maxAttempts = 40, delayMs = 750) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      systemHealth.value = await getSystemHealth()
+      backendOnline.value = true
+      return true
+    } catch {
+      backendOnline.value = false
+      await sleep(delayMs)
+    }
+  }
+
+  return false
 }
-button:disabled {
-  background-color: #555;
-  cursor: not-allowed;
+
+async function loadSystemHealth() {
+  try {
+    systemHealth.value = await getSystemHealth()
+    backendOnline.value = true
+  } catch (error) {
+    backendOnline.value = false
+    console.warn('Backend offline:', error)
+  }
 }
-.progress-section {
-  margin-top: 20px;
-  padding-top: 20px;
-  border-top: 1px solid #404040;
+
+async function loadPipelines() {
+  loadingPipelines.value = true
+
+  try {
+    const backendReady = await waitForBackendFromRenderer()
+
+    if (!backendReady) {
+      console.warn('Backend not ready. Could not load pipelines.')
+      pipelines.value = []
+      return
+    }
+
+    pipelines.value = await listPipelines()
+
+    if (pipelines.value.length && !selectedPipelineId.value) {
+      await selectWorkflow(pipelines.value[0])
+    }
+  } catch (error) {
+    console.error('Failed to load pipelines:', error)
+    pipelines.value = []
+  } finally {
+    loadingPipelines.value = false
+  }
 }
-.progress-bar-bg {
-  width: 100%;
-  background-color: #404040;
-  border-radius: 10px;
-  height: 20px;
-  overflow: hidden;
-  margin: 10px 0;
+
+async function selectWorkflow(workflow) {
+  if (!workflow?.id) return
+
+  selectedPipelineId.value = workflow.id
+  activeSection.value = 'workflows'
+
+  try {
+    selectedWorkflowDetail.value = await getPipelineDetail(workflow.id)
+    initializeControls(selectedWorkflowDetail.value.controls || [])
+
+    outputUrl.value = ''
+
+    if (!isProcessing.value) {
+      currentJob.value = null
+    }
+  } catch (error) {
+    console.error('Failed to load workflow detail:', error)
+  }
 }
-.progress-bar-fill {
-  height: 100%;
-  background-color: #4CAF50;
-  transition: width 0.3s ease;
+
+function initializeControls(controls) {
+  const values = {}
+
+  for (const control of controls) {
+    values[control.key] = control.default
+  }
+
+  controlValues.value = values
 }
-</style>
+
+function updateControl(key, value) {
+  controlValues.value = {
+    ...controlValues.value,
+    [key]: value
+  }
+}
+
+async function selectMediaFile() {
+  if (window.visualine?.selectMediaFile) {
+    const selected = await window.visualine.selectMediaFile()
+
+    if (selected) {
+      mediaPath.value = selected
+    }
+
+    return
+  }
+
+  const manual = window.prompt('Paste absolute media path:')
+
+  if (manual) {
+    mediaPath.value = manual
+  }
+}
+
+async function runWorkflow() {
+  if (!canRun.value) return
+
+  closeCurrentSocket()
+
+  outputUrl.value = ''
+  currentJob.value = {
+    status: 'queued',
+    progress: 0,
+    message: 'Queuing job...'
+  }
+
+  try {
+    const payload = {
+      pipeline_id: selectedPipelineId.value,
+      input_path: mediaPath.value,
+      overrides: controlValues.value
+    }
+
+    const response =
+      selectedMediaKind.value === 'image'
+        ? await processImage(payload)
+        : await processVideo(payload)
+
+    currentJob.value = response
+
+    if (response?.job_id) {
+      attachJobSocket(response.job_id)
+    }
+  } catch (error) {
+    currentJob.value = {
+      status: 'failed',
+      progress: 0,
+      error_message: error.message || 'Failed to start processing job.'
+    }
+
+    await loadSystemHealth()
+  }
+}
+
+function attachJobSocket(jobId) {
+  closeCurrentSocket()
+
+  currentSocket.value = createJobProgressSocket(jobId, {
+    onMessage(data) {
+      currentJob.value = data
+
+      const status = String(data.status || '').toLowerCase()
+
+      if (status === 'completed') {
+        outputUrl.value = getJobOutputUrl(jobId)
+        loadSystemHealth()
+      }
+
+      if (status === 'failed' || status === 'cancelled') {
+        loadSystemHealth()
+      }
+    },
+
+    onError(error) {
+      console.warn('Job websocket error:', error)
+    },
+
+    onClose() {
+      currentSocket.value = null
+    }
+  })
+}
+
+function closeCurrentSocket() {
+  if (!currentSocket.value) return
+
+  try {
+    currentSocket.value.close()
+  } catch {
+    // Ignore close errors.
+  }
+
+  currentSocket.value = null
+}
+
+onMounted(async () => {
+  await waitForBackendFromRenderer()
+  await loadPipelines()
+
+  healthInterval = window.setInterval(loadSystemHealth, 5000)
+})
+
+onUnmounted(() => {
+  if (healthInterval) {
+    window.clearInterval(healthInterval)
+    healthInterval = null
+  }
+
+  closeCurrentSocket()
+})
+</script>

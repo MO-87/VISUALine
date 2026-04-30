@@ -1,3 +1,0 @@
-[pip]
-extra-index-url = ["https://download.pytorch.org/whl/cu128"]
-index-strategy = "unsafe-best-match"

@@ -1,20 +1,36 @@
-import { contextBridge } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
-// Custom APIs for renderer
-const api = {}
+const visualineAPI = {
+  selectMediaFile: () => ipcRenderer.invoke('dialog:select-media-file'),
+  selectOutputDir: () => ipcRenderer.invoke('dialog:select-output-dir'),
+  openPath: (targetPath) => ipcRenderer.invoke('shell:open-path', targetPath),
+  openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
 
-// Use `contextBridge` APIs to expose Electron APIs to
-// renderer only if context isolation is enabled, otherwise
-// just add to the DOM global.
+  createMediaUrl: (filePath) => {
+    if (!filePath) return ''
+
+    if (filePath.startsWith('visualine-media://')) {
+      return filePath
+    }
+
+    return `visualine-media://local?path=${encodeURIComponent(filePath)}`
+  },
+
+  backend: {
+    baseUrl: 'http://127.0.0.1:8000',
+    wsBaseUrl: 'ws://127.0.0.1:8000'
+  }
+}
+
 if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('electron', electronAPI)
-    contextBridge.exposeInMainWorld('api', api)
+    contextBridge.exposeInMainWorld('visualine', visualineAPI)
   } catch (error) {
     console.error(error)
   }
 } else {
   window.electron = electronAPI
-  window.api = api
+  window.visualine = visualineAPI
 }

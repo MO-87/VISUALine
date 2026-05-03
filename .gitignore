@@ -89,3 +89,10 @@ docker-compose.override.yml
 # Media
 # ======================
 data/
+
+# ======================
+# Vendor build artifacts
+# ======================
+vendor/GroundingDINO/build/
+vendor/GroundingDINO/*.egg-info/
+vendor/GroundingDINO/**/__pycache__/

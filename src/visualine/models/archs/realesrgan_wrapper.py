@@ -10,109 +10,101 @@ from visualine.models.base_wrapper import BaseModelWrapper
 
 logger = logging.getLogger(__name__)
 
+
 class RealESRGANArchWrapper(BaseModelWrapper):
+    """
+    A wrapper around the Real-ESRGAN model for inference.
+    """
+
     use_torch: bool = True
 
-    def __init__(self, model_filename: str, scale: int, tile: int = 0, tile_pad: int = 10, half: bool = False):
+    def __init__(self, model_filename: str, scale: int, tile: int = 0, half: bool = False):
         self.model_filename = model_filename
         self.scale = scale
         self.tile = tile
-        self.tile_pad = tile_pad
         self.half = half
-        self.upsampler: RealESRGANer | None = None
-        self._device_str: str = 'cpu'
-
-        self.rrdb_params = {
-            'num_in_ch': 3, 'num_out_ch': 3, 'num_feat': 64,
-            'num_block': 23, 'num_grow_ch': 32, 'scale': self.scale
-        }
-        
-        self.srvgg_params = {
-            'num_in_ch': 3, 'num_out_ch': 3, 'num_feat': 64,
-            'num_conv': 16, 'upscale': self.scale, 'act_type': 'prelu'
-        }
+        self._device_str = 'cpu'
+        self.upsampler = None
 
     def to(self, device: torch.device) -> 'RealESRGANArchWrapper':
         target_device_str = str(device)
         if self.upsampler is None or self._device_str != target_device_str:
             self._device_str = target_device_str
             
-            # 1. Enable CuDNN Benchmarking for faster convolution selection
             if "cuda" in target_device_str:
                 torch.backends.cudnn.benchmark = True
+
+            model_path = str(get_model_path(self.model_filename))
             
-            model_path_str = str(get_model_path(self.model_filename))
-            filename_lower = self.model_filename.lower()
-            
-            if "animevideo" in filename_lower or "compact" in filename_lower:
-                logger.info("Fast Video Model detected. Booting SRVGGNetCompact engine...")
-                model_instance = SRVGGNetCompact(**self.srvgg_params)
+            if self.model_filename.endswith(".ts"):
+                # Load pre-compiled TorchScript/TensorRT model
+                self.model = torch.jit.load(model_path).to(device)
+                self.model.eval()
+                logger.info(f"Loaded compiled RealESRGAN model from {self.model_filename}")
+                return self
+
+            # Select architecture based on model name
+            if 'anime' in self.model_filename.lower() or 'realesr-v3' in self.model_filename.lower():
+                model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=self.scale)
             else:
-                logger.info("Heavy Photo Model detected. Booting RRDBNet engine...")
-                model_instance = RRDBNet(**self.rrdb_params)
-            
-            # 2. Push model to device and convert to channels_last memory format
-            model_instance = model_instance.to(device, memory_format=torch.channels_last)
-            
-            if self.half:
-                model_instance = model_instance.half()
+                model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=self.scale)
 
-            model_instance.eval()
-            for param in model_instance.parameters():
-                param.requires_grad = False
-
-            # 3. Initialize RealESRGANer FIRST (This safely loads the state_dict)
             self.upsampler = RealESRGANer(
                 scale=self.scale,
-                model_path=model_path_str,
-                model=model_instance,
+                model_path=model_path,
+                model=model,
                 tile=self.tile,
-                tile_pad=self.tile_pad,
+                tile_pad=10,
+                pre_pad=0,
                 half=self.half,
-                device=self._device_str
+                device=device
             )
-
-            logger.info(f"Model loaded on {self._device_str}. Tile: {self.tile}, Pad: {self.tile_pad}, FP16: {self.half}")
+            logger.info(f"RealESRGAN Model loaded on {self._device_str}. FP16: {self.half}")
             
         return self
 
     @torch.inference_mode()
     def predict(self, batch_tensor: torch.Tensor) -> torch.Tensor:
-        # Convert input to channels_last to match the optimized model weights
-        batch_tensor = batch_tensor.to(memory_format=torch.channels_last)
+        """
+        Args:
+            batch_tensor: RGB tensor (B, C, H, W) 0-255.
+        Returns:
+            RGB tensor (B, C, H*scale, W*scale) 0-255.
+        """
+        if self.model_filename.endswith(".ts"):
+            # VISUALine RGB -> model BGR [0, 1]
+            x = batch_tensor[:, [2, 1, 0], :, :].float().clamp(0.0, 255.0) / 255.0
+            if self.half: x = x.half()
+            
+            out = self.model(x)
+            
+            # model BGR -> VISUALine RGB [0, 255]
+            out = torch.clamp(out, 0.0, 1.0)
+            out = out[:, [2, 1, 0], :, :] * 255.0
+            return out.float().contiguous()
 
-        # Permute RGB to BGR and normalize in one go
-        batch_tensor = batch_tensor[:, [2, 1, 0], :, :] / 255.0
-        
-        if self.half:
-            batch_tensor = batch_tensor.half()
-
-        if self.tile == 0:
-            out = self.upsampler.model(batch_tensor)
-        else:
-            # Note: Tiling in Python is a bottleneck. 
-            # If batch sizes are large, consider optimizing the upstream realesrganer tiling logic to batch crops.
-            outs = []
-            for i in range(batch_tensor.size(0)):
-                self.upsampler.img = batch_tensor[i].unsqueeze(0)
-                self.upsampler.process() 
-                outs.append(self.upsampler.output.squeeze(0))
-            out = torch.stack(outs)
-
-        # Output comes back. Clamp, permute BGR back to RGB, scale back to 255
-        out = torch.clamp(out, 0.0, 1.0)
-        out = out[:, [2, 1, 0], :, :] * 255.0
-
-        # Ensure contiguous memory format before returning to the rest of the pipeline
-        return out.float().contiguous()
+        # For .pth models, we use RealESRGANer wrapper which expects numpy BGR
+        results = []
+        for i in range(batch_tensor.shape[0]):
+            # Convert single frame to numpy BGR (MUST BE UINT8 for RealESRGANer)
+            img_rgb = batch_tensor[i].permute(1, 2, 0).cpu().numpy().clip(0, 255).astype('uint8')
+            img_bgr = img_rgb[:, :, ::-1]
+            
+            # Enhance (returns numpy BGR uint8)
+            output, _ = self.upsampler.enhance(img_bgr, outscale=self.scale)
+            
+            # Convert back to RGB Tensor
+            out_rgb = output[:, :, ::-1].copy()
+            results.append(torch.from_numpy(out_rgb).permute(2, 0, 1))
+            
+        return torch.stack(results).float().to(batch_tensor.device)
 
     def cleanup(self) -> None:
-        logger.debug(f"Cleaning up resources for RealESRGANer ({self.model_filename})...")
-        if self.upsampler and hasattr(self.upsampler, 'model') and self.upsampler.model is not None:
+        if self.upsampler is not None:
             try:
                 self.upsampler.model.to('cpu')
             except Exception as e:
-                logger.warning(f"Could not move torch model to CPU: {e}")
+                logger.warning(f"Could not move RealESRGAN model to CPU: {e}")
 
         if hasattr(self, 'upsampler'):
             del self.upsampler

@@ -50,10 +50,12 @@ class DynamicUpscaleNode(NodeBase):
         if self.is_setup:
             return
         
-        # Auto-detect model type if not explicitly provided
-        if "span" in self.model_filename.lower() and self.model_type == "realesrgan":
+        # Auto-detect model type if not explicitly provided or if it's the default
+        model_name = self.model_filename.lower()
+        if "span" in model_name:
             self.model_type = "span"
-            logger.info(f"Auto-detected SPAN model type for {self.model_filename}")
+        else:
+            self.model_type = "realesrgan"
 
         logger.info(f"Setting up {self.node_name} ({self.model_type.upper()}) with {self.model_filename}...")
         model_cache_key = f"dynamic_vector_{self.model_type}_{self.model_filename}_s{self.scale}_fp16{self.fp16}"
@@ -64,13 +66,14 @@ class DynamicUpscaleNode(NodeBase):
                     model_filename=self.model_filename,
                     scale=self.scale,
                     feature_channels=self.feature_channels,
-                    half=self.fp16
+                    half=self.fp16,
+                    tile_size=0 # We handle tiling in the node
                 )
             else: # Default to RealESRGAN
                 return RealESRGANArchWrapper(
                     model_filename=self.model_filename,
                     scale=self.scale,
-                    tile=0,
+                    tile=0, # We handle tiling in the node
                     half=self.fp16
                 )
         
@@ -79,114 +82,112 @@ class DynamicUpscaleNode(NodeBase):
             model_loader=model_loader,
             device=str(device)
         )
+
+        # SMART SYNC: If using TensorRT, force parameters to match the compiled engine
+        if self.model_filename.endswith(".ts"):
+            logger.info("TensorRT model detected. Syncing node parameters to engine specs.")
+            self.tile_size = 64
+            self.padding = 16
+            self.block_size = 96
+            self.batch_size = 1
+            
         self.is_setup = True
 
     @torch.inference_mode()
-    def process(self, batch: torch.Tensor) -> torch.Tensor:
+    def process(self, data: torch.Tensor | Dict[str, Any]) -> torch.Tensor:
         if not self.is_setup or self.model_wrapper is None:
             raise RuntimeError(f"{self.node_name} process called before successful setup.")
 
+        # 1. Handle Input (PipelineManager provides [0, 255] RGB)
+        batch = data.get("tensor") if isinstance(data, dict) else data
+        if not isinstance(batch, torch.Tensor):
+            raise TypeError(f"{self.node_name} expects torch.Tensor, got {type(batch)}")
+
         device = batch.device
-        
-        # Extract the raw model from wrapper
-        if self.model_type == "span":
-            model = self.model_wrapper.model
-        else:
-            model = self.model_wrapper.upsampler.model
-            
         dtype = torch.float16 if self.fp16 else torch.float32
         
-        batch_bgr = batch[:, [2, 1, 0], :, :].to(dtype)
+        # 2. Preparation
         processed_frames = []
 
-        for i in range(batch_bgr.shape[0]):
-            curr_tensor = batch_bgr[i:i+1] / 255.0
-            _, _, h, w = curr_tensor.shape
+        for i in range(batch.shape[0]):
+            curr_frame = batch[i:i+1] # [1, 3, H, W] RGB 0-255
+            _, _, h, w = curr_frame.shape
             
-            is_refresh = (self.frame_count % self.refresh_interval == 0) or (self.prev_input is None)
+            # Gridding logic
             rows, cols = math.ceil(h / self.tile_size), math.ceil(w / self.tile_size)
+            is_refresh = (self.frame_count % self.refresh_interval == 0) or (self.prev_input is None)
             
             if is_refresh:
                 mask = torch.ones((rows, cols), dtype=torch.bool, device=device)
             else:
-                # Basic motion mask
-                diff = torch.abs(curr_tensor - self.prev_input).mean(dim=1, keepdim=True)
+                # Motion detection
+                diff = torch.abs(curr_frame.float() / 255.0 - self.prev_input.float() / 255.0).mean(dim=1, keepdim=True)
                 block_max = F.max_pool2d(diff, self.tile_size, self.tile_size, ceil_mode=True)
                 mask = (block_max > self.threshold).squeeze()
-                
-                # Reshape mask to 2D
-                if mask.ndim == 0: mask = mask.unsqueeze(0).unsqueeze(0)
+                if mask.ndim == 0: mask = mask.view(1, 1)
                 elif mask.ndim == 1: mask = mask.view(rows, cols)
 
             active_mask = mask.flatten()
             num_active = active_mask.sum().item()
             
-            # Prepare Output Buffer
+            # Prepare Output Canvas
             out_h, out_w = h * self.scale, w * self.scale
             grid_h, grid_w = rows * self.tile_size * self.scale, cols * self.tile_size * self.scale
             
-            if is_refresh or self.prev_output is None:
-                curr_output = torch.zeros((1, 3, grid_h, grid_w), dtype=dtype, device=device)
-            else:
-                # Copy prev_output into the new grid buffer
-                curr_output = torch.zeros((1, 3, grid_h, grid_w), dtype=dtype, device=device)
-                ph_c = min(self.prev_output.shape[2], grid_h)
-                pw_c = min(self.prev_output.shape[3], grid_w)
-                curr_output[0, :, :ph_c, :pw_c] = self.prev_output[0, :, :ph_c, :pw_c]
+            # Create a clean canvas for every frame
+            canvas = torch.zeros((1, 3, grid_h, grid_w), dtype=dtype, device=device)
+            
+            if not is_refresh and self.prev_output is not None:
+                # Copy previous result into new grid (handles resolution changes if any)
+                ph, pw = self.prev_output.shape[2], self.prev_output.shape[3]
+                canvas[0, :, :ph, :pw] = self.prev_output[0].to(dtype)
 
-            # Vectorized Tiling and Inference
+            # 3. Processing Tiles
             if num_active > 0:
+                # Padding
                 pad_t, pad_l = self.padding, self.padding
                 pad_b, pad_r = self.padding + (rows * self.tile_size - h), self.padding + (cols * self.tile_size - w)
-                padded_input = F.pad(curr_tensor, (pad_l, pad_r, pad_t, pad_b), mode='reflect')
+                padded_input = F.pad(curr_frame, (pad_l, pad_r, pad_t, pad_b), mode='reflect')
                 
-                # Extract all tiles
-                tiles_unfolded = padded_input.unfold(2, self.block_size, self.tile_size).unfold(3, self.block_size, self.tile_size)
-                all_tiles = tiles_unfolded.permute(0, 2, 3, 1, 4, 5).reshape(-1, 3, self.block_size, self.block_size)
-                active_tiles = all_tiles[active_mask]
+                # Unfold into tiles
+                tiles = padded_input.unfold(2, self.block_size, self.tile_size).unfold(3, self.block_size, self.tile_size)
+                tiles = tiles.permute(0, 2, 3, 1, 4, 5).reshape(-1, 3, self.block_size, self.block_size)
                 
-                out_tiles_list = []
+                active_tiles = tiles[active_mask]
+                processed_tiles = []
+                
+                # Process tiles through the wrapper to ensure correct normalization
+                # RealESRGANArchWrapper.predict expects [B, 3, H, W] RGB 0-255
                 for j in range(0, num_active, self.batch_size):
-                    out_tiles_list.append(model(active_tiles[j : j + self.batch_size]))
+                    t_batch = active_tiles[j : j + self.batch_size]
+                    # The wrapper handles all complexity (BGR conversion, 0-1, SPAN mean, etc.)
+                    t_out = self.model_wrapper.predict(t_batch)
+                    processed_tiles.append(t_out.to(dtype))
                 
-                out_tiles_all = torch.cat(out_tiles_list, dim=0)
-                # Crop model output padding
-                s_p, e_p = self.padding * self.scale, (self.padding + self.tile_size) * self.scale
-                # Bug fix: cast TRT output to buffer dtype
-                out_tiles_final = out_tiles_all[:, :, s_p:e_p, s_p:e_p].to(dtype)
+                all_processed = torch.cat(processed_tiles, dim=0)
                 
-                # Stitching
-                out_ts = self.tile_size * self.scale
-                curr_output_reshaped = curr_output.view(1, 3, rows, out_ts, cols, out_ts)
-                curr_output_reshaped = curr_output_reshaped.permute(0, 2, 4, 1, 3, 5).reshape(-1, 3, out_ts, out_ts)
-                curr_output_reshaped[active_mask] = out_tiles_final
-                curr_output = curr_output_reshaped.reshape(1, rows, cols, 3, out_ts, out_ts).permute(0, 3, 1, 4, 2, 5).reshape(1, 3, grid_h, grid_w)
+                # Crop padding from processed tiles
+                s, e = self.padding * self.scale, (self.padding + self.tile_size) * self.scale
+                final_tiles = all_processed[:, :, s:e, s:e]
+                
+                # 4. Stitching
+                ts = self.tile_size * self.scale
+                canvas_view = canvas.view(1, 3, rows, ts, cols, ts).permute(0, 2, 4, 1, 3, 5).reshape(-1, 3, ts, ts)
+                canvas_view[active_mask] = final_tiles
+                canvas = canvas_view.view(1, rows, cols, 3, ts, ts).permute(0, 3, 1, 4, 2, 5).reshape(1, 3, grid_h, grid_w)
 
-            # Crop grid to actual output resolution
-            curr_output_final = curr_output[:, :, :out_h, :out_w]
+            # Crop canvas to exact frame resolution
+            final_frame = canvas[:, :, :out_h, :out_w]
             
-            # STATE PERSISTENCE
-            self.prev_input = curr_tensor.clone()
-            self.prev_output = curr_output_final.clone()
+            # Update state
+            self.prev_input = curr_frame.clone()
+            self.prev_output = final_frame.clone()
             self.frame_count += 1
+            processed_frames.append(final_frame)
 
-            # DEBUG VIEW
-            if self.debug_view and num_active > 0:
-                out_tiles_final[:, :, 0, :] = 1.0
-                out_tiles_final[:, :, -1, :] = 1.0
-                out_tiles_final[:, :, :, 0] = 1.0
-                out_tiles_final[:, :, :, -1] = 1.0
-                curr_output_reshaped = curr_output.view(1, 3, rows, out_ts, cols, out_ts)
-                curr_output_reshaped = curr_output_reshaped.permute(0, 2, 4, 1, 3, 5).reshape(-1, 3, out_ts, out_ts)
-                curr_output_reshaped[active_mask] = out_tiles_final
-                curr_output_final = curr_output[:, :, :out_h, :out_w]
-
-            processed_frames.append(curr_output_final)
-
-        # Back to RGB uint8
-        final_batch_bgr = torch.cat(processed_frames, dim=0)
-        final_batch_rgb = final_batch_bgr[:, [2, 1, 0], :, :]
-        return (torch.clamp(final_batch_rgb, 0.0, 1.0) * 255.0).float()
+        # 5. Finalize Batch
+        output_tensor = torch.cat(processed_frames, dim=0)
+        return output_tensor.float().contiguous()
 
     def teardown(self) -> None:
         self.model_wrapper = None 

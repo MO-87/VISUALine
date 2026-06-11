@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VISUALine - Advanced Control Suite</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        :root { --bg: #0f0f0f; --card-bg: #1a1a1a; --accent: #00d1ff; --text: #e0e0e0; }
+        body { background-color: var(--bg); color: var(--text); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+        .navbar { background: #000; border-bottom: 1px solid #333; }
+        .sidebar { background: var(--card-bg); border-right: 1px solid #333; overflow-y: auto; }
+        .main-view { overflow-y: auto; padding: 20px; }
+        .card { background: #222; border: 1px solid #333; color: white; margin-bottom: 20px; }
+        .btn-primary { background: var(--accent); border: none; color: #000; font-weight: bold; }
+        .btn-primary:hover { background: #00b8e6; color: #000; }
+        .log-window { background: #000; color: #00ff00; font-family: monospace; font-size: 11px; padding: 10px; border-radius: 4px; height: 300px; overflow-y: auto; border: 1px solid #444; white-space: pre-wrap; }
+        .preview-container { display: flex; gap: 10px; height: 100%; min-height: 400px; }
+        .preview-box { flex: 1; background: #000; border: 1px solid #333; position: relative; border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+        .preview-label { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 2px 10px; border-radius: 4px; font-size: 12px; border: 1px solid var(--accent); z-index: 10; }
+        video { width: 100%; height: 100%; object-fit: contain; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .loader { width: 100%; height: 4px; background: #333; position: relative; overflow: hidden; display: none; }
+        .loader-bar { width: 40%; height: 100%; background: var(--accent); position: absolute; animation: loading 1.5s infinite linear; }
+        @keyframes loading { from { left: -40%; } to { left: 100%; } }
+    </style>
+</head>
+<body>
+
+    <nav class="navbar navbar-dark px-4">
+        <span class="navbar-brand mb-0 h1">🎬 VISUALine Professional Suite</span>
+        <div class="d-flex align-items-center">
+            <span id="api-status" class="badge bg-secondary me-2">Checking API...</span>
+            <span id="gpu-info" class="text-muted small">NVIDIA GPU Mode</span>
+        </div>
+    </nav>
+
+    <div class="container-fluid flex-grow-1">
+        <div class="row h-100">
+            <!-- Sidebar -->
+            <div class="col-md-3 sidebar p-3">
+                <div class="card p-3">
+                    <h5 class="mb-3">🛠️ Hardware Optimization</h5>
+                    <div class="mb-3">
+                        <label class="form-label small">Target Model</label>
+                        <select id="opt-model-select" class="form-select form-select-sm mb-2">
+                            <option value="span">SPAN (Dynamic Upscale)</option>
+                            <option value="realesrgan">RealESRGAN Anime</option>
+                            <option value="rife">RIFE (Interpolation)</option>
+                        </select>
+                        <div id="model-status-info" class="small mb-2">Status: <span id="model-status-text">...</span></div>
+                        <button id="btn-optimize" class="btn btn-primary btn-sm w-100" onclick="startOptimization()">Optimize for My GPU</button>
+                    </div>
+                    
+                    <h6 class="small text-muted mb-2">Live Build Logs</h6>
+                    <div id="build-log" class="log-window">System idle...</div>
+                </div>
+
+                <div class="card p-3">
+                    <h5 class="mb-3">⚙️ Processing Settings</h5>
+                    <label class="form-label small">Active Model</label>
+                    <select id="model-choice" class="form-select form-select-sm mb-3">
+                        <option value="span">SPAN (Swift)</option>
+                        <option value="realesrgan">RealESRGAN</option>
+                    </select>
+
+                    <label class="form-label small">Inference Engine</label>
+                    <select id="engine-select" class="form-select form-select-sm mb-3">
+                        <option value="trt">TensorRT (Optimized)</option>
+                        <option value="base" selected>PyTorch (Base)</option>
+                    </select>
+                    
+                    <label class="form-label small">Motion Threshold: <span id="val-thresh">0.02</span></label>
+                    <input type="range" class="form-range" id="threshold" min="0.001" max="0.1" step="0.001" value="0.02" 
+                           oninput="document.getElementById('val-thresh').innerText=this.value">
+                </div>
+            </div>
+
+            <!-- Main View -->
+            <div class="col-md-9 main-view">
+                <div class="card p-3">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="mb-0">🎞️ Video Enhancement</h5>
+                        <input type="file" id="video-input" class="d-none" accept="video/*" onchange="handleFile(this)">
+                        <button class="btn btn-outline-info btn-sm" onclick="document.getElementById('video-input').click()">Upload Video</button>
+                    </div>
+
+                    <div id="proc-loader" class="loader mb-3"><div class="loader-bar"></div></div>
+
+                    <div class="preview-container">
+                        <div class="preview-box">
+                            <span class="preview-label">Original</span>
+                            <video id="vid-orig" controls muted></video>
+                        </div>
+                        <div class="preview-box">
+                            <span class="preview-label">Enhanced</span>
+                            <video id="vid-proc" controls></video>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = "http://127.0.0.1:8001";
+        let isOptimizing = false;
+        let modelStatuses = {};
+
+        async function checkModels() {
+            try {
+                const res = await fetch(`${API_URL}/system/models`);
+                modelStatuses = await res.json();
+                updateStatusDisplay();
+                document.getElementById('api-status').className = "badge bg-success";
+                document.getElementById('api-status').innerText = "API Online";
+            } catch (e) {
+                document.getElementById('api-status').className = "badge bg-danger";
+                document.getElementById('api-status').innerText = "API Offline";
+            }
+        }
+
+        function updateStatusDisplay() {
+            const selected = document.getElementById('opt-model-select').value;
+            const statusText = document.getElementById('model-status-text');
+            if (modelStatuses[selected]) {
+                statusText.innerHTML = '<span class="badge bg-success">READY</span>';
+            } else {
+                statusText.innerHTML = '<span class="badge bg-danger">NOT OPTIMIZED</span>';
+            }
+        }
+
+        document.getElementById('opt-model-select').onchange = updateStatusDisplay;
+
+        function startOptimization() {
+            if (isOptimizing) return;
+            const model = document.getElementById('opt-model-select').value;
+            isOptimizing = true;
+            const logDiv = document.getElementById('build-log');
+            logDiv.innerText = `[INFO] Requesting build for ${model}...\n`;
+            
+            const eventSource = new EventSource(`${API_URL}/system/optimize/stream?model_type=${model}`);
+            
+            eventSource.onmessage = (event) => {
+                logDiv.innerText += event.data + "\n";
+                logDiv.scrollTop = logDiv.scrollHeight;
+                if (event.data.includes("[SUCCESS]") || event.data.includes("[ERROR]")) {
+                    eventSource.close();
+                    isOptimizing = false;
+                    checkModels();
+                }
+            };
+
+            eventSource.onerror = (err) => {
+                logDiv.innerText += "[ERROR] Connection lost or compilation timed out.\n";
+                eventSource.close();
+                isOptimizing = false;
+            };
+        }
+
+        async function handleFile(input) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const origVid = document.getElementById('vid-orig');
+            origVid.src = URL.createObjectURL(file);
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('use_trt', document.getElementById('engine-select').value === 'trt');
+            formData.append('model_choice', document.getElementById('model-choice').value);
+            formData.append('threshold', document.getElementById('threshold').value);
+
+            document.getElementById('proc-loader').style.display = 'block';
+            
+            try {
+                const res = await fetch(`${API_URL}/upscale/video`, { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.url) document.getElementById('vid-proc').src = `${API_URL}${data.url}`;
+            } catch (e) {
+                alert("Processing failed: " + e.message);
+            } finally {
+                document.getElementById('proc-loader').style.display = 'none';
+            }
+        }
+
+        setInterval(checkModels, 5000);
+        checkModels();
+    </script>
+</body>
+</html>

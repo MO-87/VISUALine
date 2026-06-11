@@ -1,0 +1,73 @@
+pipeline_name: "03_Old_Video_Enhancement_FAST"
+
+ui:
+  display_name: "Old Video Enhancement — Fast"
+  category: "Restoration"
+  description: "Quickly improve low-quality footage with denoising, sharpening, contrast, and color correction."
+  input_types: ["video", "gif", "image"]
+  speed: "fast"
+  supports_prompt: false
+  is_hq: false
+  tags: ["restoration", "enhancement", "denoise", "sharpen", "fast"]
+
+  controls:
+    - key: "denoise_strength"
+      label: "Denoise"
+      type: "slider"
+      min: 0.0
+      max: 0.3
+      step: 0.01
+      default: 0.08
+      node: 0
+      param: "denoise_strength"
+
+    - key: "sharpen_strength"
+      label: "Sharpness"
+      type: "slider"
+      min: 0.0
+      max: 0.8
+      step: 0.01
+      default: 0.28
+      node: 0
+      param: "sharpen_strength"
+
+    - key: "contrast"
+      label: "Contrast"
+      type: "slider"
+      min: 0.8
+      max: 1.4
+      step: 0.01
+      default: 1.10
+      node: 0
+      param: "contrast"
+
+    - key: "saturation"
+      label: "Saturation"
+      type: "slider"
+      min: 0.5
+      max: 1.5
+      step: 0.01
+      default: 1.08
+      node: 0
+      param: "saturation"
+
+    - key: "auto_levels"
+      label: "Auto levels"
+      type: "toggle"
+      default: false
+      advanced: true
+      node: 0
+      param: "auto_levels"
+
+pipeline:
+  - class: "utils.video_enhance_node.VideoEnhanceNode"
+    params:
+      denoise_strength: 0.08
+      sharpen_strength: 0.28
+      contrast: 1.10
+      brightness: 0.015
+      saturation: 1.08
+      gamma: 0.92
+      kernel_size: 5
+      auto_levels: false
+      preserve_mask: false

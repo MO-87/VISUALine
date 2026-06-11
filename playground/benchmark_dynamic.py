@@ -85,14 +85,28 @@ def run_benchmark(video_path: Path, node_class, config, output_dir: Path, tag: s
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--input", type=str, help="Path to a specific video file or directory")
     parser.add_argument("--max_frames", type=int, default=None)
     parser.add_argument("--force", action="store_true", help="Force re-run all tests")
     args = parser.parse_args()
 
-    input_dir = Path("/home/theodoros/graduation_research/results_2/inputs/video/")
     output_dir = Path("data/output/benchmark/")
-    videos = list(input_dir.glob("*.mp4"))
     
+    if args.input:
+        input_path = Path(args.input)
+        if input_path.is_file():
+            videos = [input_path]
+        else:
+            videos = list(input_path.glob("*.mp4")) + list(input_path.glob("*.mkv"))
+    else:
+        # Default fallback
+        input_dir = Path("data/input/")
+        videos = list(input_dir.glob("*.mp4"))
+    
+    if not videos:
+        logger.error(f"No videos found to process at {args.input or 'data/input/'}")
+        return
+
     # Load existing results if any
     results_file = output_dir / "benchmark_results.json"
     if results_file.exists() and not args.force:

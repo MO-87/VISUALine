@@ -5,59 +5,89 @@ build-backend = "hatchling.build"
 [project]
 name = "visualine"
 version = "0.1.0"
-description = "An open-source AI suite for visual enhancement."
+description = "A Local AI Video Editing Suite Powered by Modular Pipelines"
 readme = "README.md"
-requires-python = ">=3.10, <3.13"
+requires-python = ">=3.11,<3.12"
 license = { file = "LICENSE" }
+
 authors = [
     { name = "Mohamed Marzouk", email = "marzouk@vacts.net" },
     { name = "Theodoros Milad", email = "" },
-    { name = "Yahia [Yahia's Last Name]", email = "" },
-    { name = "Mohamed Ezzat", email = "" },
-    { name = "Kareem Moamen", email = "" },
+    { name = "Yahia", email = "" },
     { name = "Mazen Gaber", email = "" },
+    { name = "Kareem Moamen", email = "" },
+    { name = "Mohamed Ezzat", email = "" },
 ]
 
 dependencies = [
-    "torch==2.9.0",
-    "torchvision==0.24.0",
-    "pyyaml",
-    "streamlit",
-    "fastapi",
-    "uvicorn[standard]",
-    "python-multipart",
-    "opencv-python-headless",
-    "numpy",
-    "av",
-    "basicsr @ git+https://github.com/XPixelGroup/BasicSR.git",
-    "realesrgan",
-    "tensorrt>=10.14.1.48.post1",
-    "onnxscript>=0.5.7",
-    "onnx>=1.20.0",
-    "onnx-simplifier>=0.4.36",
-    "onnxruntime>=1.23.2",
-    "onnxruntime-gpu>=1.23.2",
+    # Core
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "packaging>=24.0",
+
+    # PyTorch CUDA comes from [tool.uv.sources]
+    "torch>=2.7.0",
+    "torchvision>=0.22.0",
+    "torchaudio>=2.7.0",
+
+    # Backend API
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.7",
+
+    # UI / playground
+    "streamlit>=1.35",
+
+    # Video / image IO
+    "opencv-python-headless>=4.10",
+    "imageio[ffmpeg]>=2.34",
+    "av>=12.0",
+
+    # ML / CV utilities
     "timm>=1.0.22",
     "einops>=0.8.1",
-    "imageio[ffmpeg]",
-    "matplotlib",
-    "flow-vis",
     "kornia==0.8.2",
     "kornia-rs==0.1.10",
+    "matplotlib>=3.8",
+    "scipy>=1.11",
+    "scikit-image>=0.22",
+
+    # Model ecosystem
+    "transformers==4.41.2",
+    "accelerate>=0.30",
+    "safetensors>=0.4",
+    "huggingface_hub>=0.23",
+
+    # Super-resolution / enhancement
+    "basicsr",
+    "thop",
+    "flow-vis",
+
+    # Segmentation / detection
+    "groundingdino",
+    "sam-2",
+
+    # Packaging
+    "pyinstaller>=6.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "ruff",
+    "pytest>=8.0",
+    "ruff>=0.5",
 ]
 
 [project.scripts]
-visualine-ui = "visualine.app.main_app:main"
-visualine-api = "visualine.api.server:main"
+visualine-api = "visualine.api.server:start_server"
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/visualine"]
 
 [tool.ruff]
 line-length = 120
@@ -65,5 +95,17 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/visualine"]
+[[tool.uv.index]]
+name = "pytorch-gpu"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-gpu" }
+torchvision = { index = "pytorch-gpu" }
+torchaudio = { index = "pytorch-gpu" }
+
+groundingdino = { path = "vendor/GroundingDINO", editable = true }
+
+basicsr = { git = "https://github.com/XPixelGroup/BasicSR.git" }
+sam-2 = { git = "https://github.com/facebookresearch/segment-anything-2.git" }

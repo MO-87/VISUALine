@@ -63,8 +63,10 @@ with st.sidebar:
     st.header("📁 Input Video")
     uploaded_file = st.file_uploader("Upload a custom video...", type=["mp4", "mov", "avi"])
     
+    local_path = st.text_input("OR enter local path:", placeholder="/path/to/video.mp4")
+    
     default_input_path = DATA_DIR / "input" / "sample.mp4"
-    if not uploaded_file and not default_input_path.exists():
+    if not uploaded_file and not local_path and not default_input_path.exists():
         st.warning(f"No upload provided and default '{default_input_path.name}' not found.")
         
     st.divider()
@@ -77,6 +79,8 @@ if run_button:
         temp_in.write(uploaded_file.read())
         temp_in.close()
         input_video_path = Path(temp_in.name)
+    elif local_path:
+        input_video_path = Path(local_path)
     else:
         input_video_path = default_input_path
 

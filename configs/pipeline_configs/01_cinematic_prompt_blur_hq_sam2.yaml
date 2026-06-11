@@ -1,0 +1,130 @@
+pipeline_name: "01_Cinematic_Prompt_Blur_HQ_SAM2"
+
+ui:
+  display_name: "Cinematic Prompt Blur — HQ SAM2"
+  category: "AI Editing"
+  description: "High-quality cinematic blur using text-prompt detection and SAM2 segmentation. Best for short wow-factor demos."
+  input_types: ["video", "gif"]
+  speed: "heavy"
+  supports_prompt: true
+  is_hq: true
+  tags: ["cinematic", "blur", "prompt", "sam2", "segmentation", "hq"]
+
+  controls:
+    - key: "prompt"
+      label: "Subject prompt"
+      type: "text"
+      default: "person"
+      description: "Describe the subject to keep sharp, e.g. person, woman with blue jacket, man with glasses."
+      node: 0
+      param: "prompt"
+
+    - key: "conf"
+      label: "Detection confidence"
+      type: "slider"
+      min: 0.1
+      max: 0.85
+      step: 0.05
+      default: 0.35
+      description: "Higher values are stricter. Use lower values if the subject is missed."
+      advanced: true
+      node: 0
+      param: "conf"
+
+    - key: "detect_every_n_frames"
+      label: "Detection frequency"
+      type: "select"
+      default: 5
+      options: [1, 3, 5, 10]
+      description: "How often GroundingDINO refreshes the detection box."
+      advanced: true
+      node: 0
+      param: "detect_every_n_frames"
+
+    - key: "max_boxes"
+      label: "Focus subjects"
+      type: "slider"
+      min: 1
+      max: 3
+      step: 1
+      default: 1
+      description: "Maximum number of subjects to segment and keep sharp."
+      advanced: true
+
+    - key: "full_mask_when_no_boxes"
+      label: "Keep frame unchanged if subject is missed"
+      type: "toggle"
+      default: true
+      description: "If enabled, failed detection keeps the frame sharp instead of blurring everything."
+      advanced: true
+      node: 1
+      param: "full_mask_when_no_boxes"
+
+    - key: "blur_intensity"
+      label: "Blur strength"
+      type: "slider"
+      min: 15
+      max: 81
+      step: 2
+      default: 41
+      description: "Controls how strongly the background is blurred."
+      node: 2
+      param: "blur_intensity"
+
+    - key: "mask_kernel_size"
+      label: "Mask softness"
+      type: "slider"
+      min: 5
+      max: 41
+      step: 2
+      default: 21
+      description: "Softens the SAM2 mask edge."
+      advanced: true
+      node: 2
+      param: "mask_kernel_size"
+
+    - key: "fp16"
+      label: "SAM2 AMP acceleration"
+      type: "toggle"
+      default: true
+      description: "Use mixed precision where safe. The wrapper keeps SAM2 weights stable."
+      advanced: true
+      node: 1
+      param: "fp16"
+
+pipeline:
+  - class: "segmentation.prompt_box_detection_node.PromptBoxDetectionNode"
+    params:
+      model_filename: "groundingdino_swinb_cogcoor.pth"
+      config_path: "configs/model_configs/GroundingDINO_SwinB_cfg.py"
+
+      prompt: "person"
+      conf: 0.35
+
+      detect_every_n_frames: 5
+      reuse_last_boxes: true
+      max_missing_frames: 10
+
+      box_format: "xyxy_abs"
+      min_box_area_ratio: 0.0002
+      max_box_area_ratio: 0.60
+      max_boxes: 1
+
+  - class: "segmentation.sam2_tracking_node.SAM2TrackingNode"
+    params:
+      model_filename: "sam2_hiera_small.pt"
+      model_cfg: "sam2_hiera_s.yaml"
+      fp16: true
+
+      box_format: "xyxy_abs"
+      min_box_area_ratio: 0.0002
+      max_box_area_ratio: 0.60
+      max_boxes: 1
+      full_mask_when_no_boxes: true
+
+  - class: "utils.blur_node.BokehBlurNode"
+    params:
+      blur_intensity: 41
+      invert_mask: false
+      preserve_mask: false
+      mask_kernel_size: 21

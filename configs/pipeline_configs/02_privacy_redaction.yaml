@@ -1,0 +1,77 @@
+pipeline_name: "02_Privacy_Redaction"
+
+ui:
+  display_name: "Privacy Redaction"
+  category: "Privacy"
+  description: "Automatically blur faces, people, or sensitive regions."
+  input_types: ["video", "gif"]
+  speed: "medium"
+  supports_prompt: true
+  tags: ["privacy", "redaction", "blur", "faces"]
+  controls:
+    - key: "prompt"
+      label: "Target"
+      type: "select"
+      default: "face"
+      options: ["face", "human face", "head", "person"]
+      node: 0
+      param: "prompt"
+
+    - key: "mode"
+      label: "Redaction style"
+      type: "select"
+      default: "blur"
+      options: ["blur", "pixelate", "black"]
+      node: 1
+      param: "mode"
+
+    - key: "blur_intensity"
+      label: "Blur strength"
+      type: "slider"
+      min: 15
+      max: 81
+      step: 2
+      default: 51
+      node: 1
+      param: "blur_intensity"
+
+    - key: "conf"
+      label: "Detection confidence"
+      type: "slider"
+      min: 0.1
+      max: 0.8
+      step: 0.05
+      default: 0.28
+      advanced: true
+      node: 0
+      param: "conf"
+
+
+pipeline:
+  - class: "segmentation.prompt_box_detection_node.PromptBoxDetectionNode"
+    params:
+      model_filename: "groundingdino_swinb_cogcoor.pth"
+      config_path: "configs/model_configs/GroundingDINO_SwinB_cfg.py"
+
+      prompt: "glasses"
+      conf: 0.28
+
+      detect_every_n_frames: 3
+      reuse_last_boxes: true
+      max_missing_frames: 10
+
+      box_format: "xyxy_abs"
+      min_box_area_ratio: 0.00005
+      max_box_area_ratio: 0.08
+      max_boxes: 80
+
+  - class: "utils.box_redaction_node.BoxRedactionNode"
+    params:
+      mode: "blur"
+      blur_intensity: 51
+      expand_ratio: 0.12
+
+      box_format: "xyxy_abs"
+      min_box_area_ratio: 0.00005
+      max_box_area_ratio: 0.10
+      max_boxes: 80

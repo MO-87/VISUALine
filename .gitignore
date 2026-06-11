@@ -28,6 +28,7 @@ build/
 dist/
 *.egg-info/
 .eggs/
+*.spec
 
 # ======================
 # Logs / Runtime files
@@ -56,12 +57,16 @@ htmlcov/
 # Machine Learning / Models
 # ======================
 *.pth
+*.pkl
 *.pt
 *.onnx
+*.onnx.data
 *.h5
+*.engine
 *.ckpt
 checkpoints/
-
+*.engine
+*.trt
 # ======================
 # IDE / Editor
 # ======================
@@ -75,9 +80,27 @@ checkpoints/
 # ======================
 .DS_Store
 Thumbs.db
+*.zip
+*.jpg
+*.jpeg
+*.png
+*.ppm
+!src/visualine/app/resources/icon.png
 
 # ======================
 # Docker
 # ======================
 docker-compose.override.yml
 *.pid
+
+# ======================
+# Media
+# ======================
+data/
+
+# ======================
+# Vendor build artifacts
+# ======================
+vendor/GroundingDINO/build/
+vendor/GroundingDINO/*.egg-info/
+vendor/GroundingDINO/**/__pycache__/

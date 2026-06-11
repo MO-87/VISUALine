@@ -1,0 +1,36 @@
+pipeline_name: "05_Slow_Motion_RIFE_X2"
+
+ui:
+  display_name: "Slow Motion RIFE x2"
+  category: "Motion"
+  description: "Generate smooth slow-motion video using AI frame interpolation."
+  input_types: ["video", "gif"]
+  speed: "medium"
+  supports_prompt: false
+  tags: ["slow motion", "rife", "interpolation"]
+  controls:
+    - key: "fp16"
+      label: "FP16 acceleration"
+      type: "toggle"
+      default: true
+      node: 0
+      param: "fp16"
+
+    - key: "scale"
+      label: "RIFE scale"
+      type: "slider"
+      min: 0.5
+      max: 1.0
+      step: 0.1
+      default: 1.0
+      advanced: true
+      node: 0
+      param: "scale"
+
+
+pipeline:
+  - class: "interpolation.rife_node.RIFENode"
+    params:
+      model_filename: "flownet.pkl"
+      fp16: true
+      scale: 1.0

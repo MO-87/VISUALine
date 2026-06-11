@@ -1,0 +1,12 @@
+pipeline_name: "Temporal_Consistent_Colorization"
+
+pipeline:
+  - class: "colorize.temporal_prop_node.TemporalColorPropNode"
+    params:
+      ## --- Base Colorization Params ---
+      model_filename: "ddcolor_artistic.pth"
+      render_res: 512
+      fp16: true
+      
+      ## --- Temporal Tracking Params ---
+      blend_alpha: 0.85

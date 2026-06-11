@@ -1,0 +1,9 @@
+pipeline_name: "4K_Upscale_RealESRGAN"
+
+pipeline:
+  - class: "upscale.realesrgan_node.RealESRGANNode"
+    params:
+      model_filename: "RealESRGAN_x4plus.pth"
+      scale: 4
+      tile_size: 0
+      fp16: true

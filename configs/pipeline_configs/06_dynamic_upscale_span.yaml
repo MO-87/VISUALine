@@ -1,0 +1,33 @@
+pipeline_name: "06_Dynamic_Upscale_SPAN_UltraFast"
+
+ui:
+  display_name: "Dynamic Upscale — SPAN (Turbo)"
+  category: "Performance"
+  description: "The fastest upscaling workflow available. Uses SPAN architecture with aggressive motion-masking to achieve near real-time speeds on many GPUs."
+  input_types: ["video", "image", "gif"]
+  speed: "fast"
+  is_hq: false
+  
+  controls:
+    - key: "threshold"
+      label: "Speed vs Quality"
+      type: "slider"
+      node: 0
+      param: "threshold"
+      min: 0.001
+      max: 0.2
+      step: 0.005
+      default: 0.015
+      description: "Higher = much faster, but may leave artifacts in subtle motion."
+
+pipeline:
+  - class: "upscale.dynamic_upscale_node.DynamicUpscaleNode"
+    params:
+      model_filename: "spanx4_ch48.pth"
+      scale: 4
+      threshold: 0.015
+      tile_size: 32
+      padding: 8
+      refresh_interval: 120
+      batch_size: 64
+      fp16: true

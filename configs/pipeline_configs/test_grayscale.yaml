@@ -1,0 +1,5 @@
+pipeline_name: "Test Grayscale Pipeline"
+
+pipeline:
+  - class: "utils.grayscale_node.GrayscaleNode"
+    params: {}

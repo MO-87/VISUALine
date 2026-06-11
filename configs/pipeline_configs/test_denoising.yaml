@@ -1,0 +1,7 @@
+pipeline_name: "SCUNet Based Denoising"
+
+pipeline:
+  - class: "denoise.scunet_node.SCUNetNode"
+    params:
+      model_filename: "scunet_color_real_psnr.pth"
+      fp16: true

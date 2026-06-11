@@ -1,0 +1,361 @@
+:root {
+  --bg: #080d18;
+  --panel: #101827;
+  --panel-2: #151f31;
+  --panel-3: #1c2a3e;
+
+  --border: rgba(132, 146, 187, 0.18);
+  --border-soft: rgba(132, 146, 187, 0.11);
+  --border-strong: rgba(39, 224, 209, 0.45);
+
+  --text: #e7eefc;
+  --muted: #8e9bb3;
+  --muted-2: #65738d;
+
+  --cyan: #27e0d1;
+  --purple: #7c3aed;
+  --purple-2: #a855f7;
+
+  --green: #22c55e;
+  --red: #ef4444;
+  --yellow: #f59e0b;
+
+  --shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  --shadow-soft: 0 18px 45px rgba(0, 0, 0, 0.28);
+
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(124, 58, 237, 0.16), transparent 36%),
+    radial-gradient(circle at top right, rgba(39, 224, 209, 0.1), transparent 32%),
+    var(--bg);
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  overscroll-behavior: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 0;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+a {
+  color: inherit;
+}
+
+::selection {
+  background: rgba(39, 224, 209, 0.28);
+  color: var(--text);
+}
+
+/* App-level fallbacks. Scoped layout styles live in AppShell.vue. */
+
+.app-shell {
+  width: 100vw;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-main {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-content {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Shared typography */
+
+.panel-kicker {
+  color: var(--cyan);
+  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 950;
+  letter-spacing: 0.1em;
+}
+
+.empty-panel {
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  padding: 24px;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.empty-panel.small {
+  padding: 16px;
+  font-size: 13px;
+}
+
+/* Shared form controls */
+
+.studio-input {
+  width: 100%;
+  min-height: 42px;
+  color: var(--text);
+  background: rgba(7, 16, 31, 0.92);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  outline: none;
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.studio-input::placeholder {
+  color: var(--muted-2);
+}
+
+.studio-input:focus {
+  border-color: rgba(39, 224, 209, 0.55);
+  background: rgba(7, 16, 31, 1);
+  box-shadow: 0 0 0 3px rgba(39, 224, 209, 0.08);
+}
+
+select.studio-input {
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 16px) 18px,
+    calc(100% - 11px) 18px;
+  background-size:
+    5px 5px,
+    5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 34px;
+}
+
+.studio-slider {
+  width: 100%;
+  height: 24px;
+  margin-top: 12px;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
+
+.studio-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.studio-slider::-webkit-slider-thumb {
+  margin-top: -6px;
+}
+
+/* Shared switch */
+
+.switch-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch-row input {
+  display: none;
+}
+
+.switch-track {
+  width: 46px;
+  height: 24px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  padding: 3px;
+  transition:
+    background 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.switch-thumb {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--muted);
+  transition:
+    transform 0.2s ease,
+    background 0.2s ease;
+}
+
+.switch-row input:checked + .switch-track {
+  background: rgba(39, 224, 209, 0.7);
+  box-shadow: 0 0 18px rgba(39, 224, 209, 0.16);
+}
+
+.switch-row input:checked + .switch-track .switch-thumb {
+  transform: translateX(22px);
+  background: #ffffff;
+}
+
+/* Shared buttons */
+
+.secondary-button {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 12px;
+  cursor: pointer;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 800;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease;
+}
+
+.secondary-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(39, 224, 209, 0.38);
+  background: rgba(39, 224, 209, 0.055);
+}
+
+.secondary-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.run-button {
+  width: 100%;
+  min-height: 48px;
+  border-radius: 14px;
+  color: #ffffff;
+  background: linear-gradient(90deg, var(--cyan), var(--purple));
+  box-shadow:
+    0 18px 44px rgba(39, 224, 209, 0.12),
+    0 18px 44px rgba(124, 58, 237, 0.14);
+  font-weight: 950;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition:
+    transform 0.18s ease,
+    opacity 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.run-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow:
+    0 22px 55px rgba(39, 224, 209, 0.16),
+    0 22px 55px rgba(124, 58, 237, 0.2);
+}
+
+.run-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* Shared panel helpers */
+
+.parameter-panel {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 18px 16px 18px 18px;
+  border-radius: var(--radius-lg);
+  background: rgba(16, 24, 39, 0.92);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.control-stack {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+/* Generic scrollbars */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(142, 155, 179, 0.32) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(142, 155, 179, 0.28);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(142, 155, 179, 0.42);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Remove browser default media focus outlines that look noisy in Electron. */
+
+video,
+img {
+  outline: none;
+}
+
+/* Utility safety */
+
+[hidden] {
+  display: none !important;
+}

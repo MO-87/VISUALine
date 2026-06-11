@@ -1,0 +1,79 @@
+pipeline_name: "06_Dynamic_AI_Upscale"
+
+ui:
+  display_name: "Dynamic AI Super-Resolution"
+  category: "Restoration"
+  description: "Ultra-fast upscaling using motion-aware gridding. Only processes moving parts of the frame to maximize performance on consumer GPUs. Optimized for SPAN and Real-ESRGAN."
+  input_types: ["video", "image", "gif"]
+  speed: "heavy"
+  is_hq: true
+  
+  controls:
+    - key: "model_choice"
+      label: "AI Architecture"
+      type: "select"
+      node: 1
+      param: "model_filename"
+      options:
+        - label: "SPAN x4 (Ultra-Fast)"
+          value: "spanx4_ch48.pth"
+        - label: "Real-ESRGAN Anime (Smooth)"
+          value: "realesr-animevideov3.pth"
+        - label: "Real-ESRGAN 4x Plus (Sharp)"
+          value: "RealESRGAN_x4plus.pth"
+      default: "spanx4_ch48.pth"
+
+    - key: "threshold"
+      label: "Motion Sensitivity"
+      type: "slider"
+      node: 1
+      param: "threshold"
+      min: 0.001
+      max: 0.1
+      step: 0.001
+      default: 0.005
+      description: "Lower = higher quality (processes more areas). Higher = faster (only processes significant movement)."
+
+    - key: "tile_size"
+      label: "Grid Resolution"
+      type: "select"
+      node: 1
+      param: "tile_size"
+      options:
+        - label: "Performance (32px)"
+          value: 32
+        - label: "Balanced (64px)"
+          value: 64
+        - label: "Quality (128px)"
+          value: 128
+      default: 64
+
+    - key: "denoise"
+      label: "Pre-Restoration Denoise"
+      type: "slider"
+      node: 0
+      param: "denoise_strength"
+      min: 0.0
+      max: 0.2
+      step: 0.01
+      default: 0.04
+
+pipeline:
+  # 1. Light pre-cleaning
+  - class: "utils.video_enhance_node.VideoEnhanceNode"
+    params:
+      denoise_strength: 0.04
+      contrast: 1.05
+      auto_levels: true
+
+  # 2. Vectorized Dynamic Upscaling
+  - class: "upscale.dynamic_upscale_node.DynamicUpscaleNode"
+    params:
+      model_filename: "spanx4_ch48.pth"
+      scale: 4
+      threshold: 0.005
+      tile_size: 64
+      padding: 16
+      refresh_interval: 60
+      batch_size: 32
+      fp16: true

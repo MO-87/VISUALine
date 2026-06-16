@@ -1,8 +1,8 @@
-# VISUALine: AI-Powered Visual Enhancement Suite
+# VISUALine: A Modular System for Local AI Video Processing on Consumer GPUs
 
 VISUALine is a modular, high-performance local AI video and image processing system designed for consumer GPUs. It transforms state-of-the-art computer vision models into production-ready workflows with an intuitive, node-based architecture.
 
-## 🚀 Key Features
+## Key Features
 
 *   **Dynamic AI Super-Resolution (VSR):** A motion-aware upscaling engine that selectively processes regions with movement, maximizing throughput and reducing power consumption. Supports **SPAN** and **Real-ESRGAN** variants.
 *   **Prompt-Based Subject Isolation:** Leverage **GroundingDINO** to identify and mask subjects using natural language prompts (e.g., "the person on the left", "red car").
@@ -14,7 +14,7 @@ VISUALine is a modular, high-performance local AI video and image processing sys
 
 ---
 
-## 🛠️ Setup & Installation
+## Setup & Installation
 
 ### Prerequisites
 *   **Python:** 3.10 or 3.11.
@@ -51,7 +51,7 @@ Place your AI model files (`.pth`, `.pt`, `.ts`) in the `weights/` directory. Th
 
 ---
 
-## 🖥️ Running VISUALine
+## Running VISUALine
 
 ### Universal Web UI (Recommended for Linux/WSL)
 Best for users on Hyprland, KDE, or WSL2 where Electron display protocols can vary:
@@ -77,7 +77,7 @@ npm run dev
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 VISUALine is built on a clean, scalable stack:
 
@@ -88,10 +88,9 @@ VISUALine is built on a clean, scalable stack:
 
 ---
 
-## 📄 Documentation
+## Documentation
 For technical implementation details, normalization logic, and the June 2026 performance benchmarks, refer to:
-*   [docs/ENHANCEMENTS_JUNE_2026.md](docs/ENHANCEMENTS_JUNE_2026.md)
-*   [paper_work/VISUALine_main_cited.tex](paper_work/VISUALine_main_cited.tex)
+*   [docs/ENHANCEMENTS_JUNE_2026.md](docs/Mohammed_Marzouk_Bachelor_Thesis.pdf)
 
-## ⚖️ License
+## License
 This project is licensed under the MIT License.

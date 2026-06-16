@@ -90,7 +90,7 @@ VISUALine is built on a clean, scalable stack:
 
 ## Documentation
 For technical implementation details, normalization logic, and the June 2026 performance benchmarks, refer to:
-*   [docs/ENHANCEMENTS_JUNE_2026.md](docs/Mohammed_Marzouk_Bachelor_Thesis.pdf)
+*   [docs/Bachelor_Thesis.pdf](docs/Mohammed_Marzouk_Bachelor_Thesis.pdf)
 
 ## License
 This project is licensed under the MIT License.
